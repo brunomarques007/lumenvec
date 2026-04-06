@@ -25,6 +25,12 @@ var packages = []string{
 }
 
 func main() {
+	rootDir, err := findModuleRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "find module root: %v\n", err)
+		os.Exit(1)
+	}
+
 	threshold := 90.0
 	if raw := strings.TrimSpace(os.Getenv("COVERAGE_THRESHOLD")); raw != "" {
 		value, err := strconv.ParseFloat(raw, 64)
@@ -47,12 +53,12 @@ func main() {
 	failed := false
 	for _, pkg := range packages {
 		coverFile := filepath.Join(tmpDir, strings.NewReplacer("/", "_", ".", "_").Replace(pkg)+".out")
-		if err := run("go", "test", "-coverprofile="+coverFile, pkg); err != nil {
+		if err := run(rootDir, "go", "test", "-coverprofile="+coverFile, pkg); err != nil {
 			fmt.Fprintf(os.Stderr, "go test failed for %s: %v\n", pkg, err)
 			os.Exit(1)
 		}
 
-		total, err := coverageTotal(coverFile)
+		total, err := coverageTotal(rootDir, coverFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "read coverage failed for %s: %v\n", pkg, err)
 			os.Exit(1)
@@ -74,15 +80,17 @@ func main() {
 	fmt.Println("Coverage check passed.")
 }
 
-func run(name string, args ...string) error {
+func run(dir, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
 	cmd.Stdout = ioDiscard{}
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-func coverageTotal(coverFile string) (float64, error) {
+func coverageTotal(dir, coverFile string) (float64, error) {
 	cmd := exec.Command("go", "tool", "cover", "-func="+coverFile)
+	cmd.Dir = dir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
@@ -103,6 +111,25 @@ func coverageTotal(coverFile string) (float64, error) {
 		return strconv.ParseFloat(raw, 64)
 	}
 	return 0, fmt.Errorf("missing total line")
+}
+
+func findModuleRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("go.mod not found from %s", dir)
+		}
+		dir = parent
+	}
 }
 
 type ioDiscard struct{}

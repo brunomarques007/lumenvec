@@ -1,5 +1,26 @@
 # Release Notes
 
+## v0.1.1
+
+Patch release focused on test coverage enforcement and CI reliability.
+
+### Highlights
+- Fixed module-root resolution in the coverage checker used by CI
+- Enforced `90%` minimum coverage across production packages
+- Added package-local unit tests across production packages
+- Kept examples outside the formal coverage threshold
+
+### Included in this release
+- Portable coverage verification via `go run ./tools/checkcoverage`
+- CI workflow updated to fail on coverage regressions
+- README, CONTRIBUTING, and Makefile updated to document the new workflow
+- Test layout aligned with idiomatic Go package-local tests
+
+### Suggested tag
+```bash
+git tag -a v0.1.1 -m "LumenVec v0.1.1"
+```
+
 ## v0.1.0
 
 Initial public release of LumenVec.
@@ -28,11 +49,3 @@ Initial public release of LumenVec.
 ```bash
 git tag -a v0.1.0 -m "LumenVec v0.1.0"
 ```
-
-## Post-release updates
-
-### Coverage and CI hardening
-- Added package-local unit tests across production packages
-- Enforced a `90%` minimum coverage threshold for production packages
-- Added `go run ./tools/checkcoverage` for local and CI coverage verification
-- Updated CI, README, CONTRIBUTING, and Makefile to reflect the new coverage policy
