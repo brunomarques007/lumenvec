@@ -3,8 +3,8 @@
 *.dll
 *.so
 *.dylib
-lumenvec
-server
+/lumenvec
+/server
 
 # Build artifacts
 bin/
