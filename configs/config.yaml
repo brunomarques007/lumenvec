@@ -1,0 +1,23 @@
+server:
+  port: 19190
+  read_timeout: 10s
+  write_timeout: 10s
+  api_key: ""
+  rate_limit_rps: 100
+
+database:
+  snapshot_path: "./data/snapshot.json"
+  wal_path: "./data/wal.log"
+  snapshot_every: 25
+
+limits:
+  max_body_bytes: 1048576
+  max_vector_dim: 4096
+  max_k: 100
+
+search:
+  mode: "exact"
+
+logging:
+  level: "info"
+  output: "stdout"

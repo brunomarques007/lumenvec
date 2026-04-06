@@ -1,0 +1,33 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+lumenvec
+server
+
+# Build artifacts
+bin/
+dist/
+build/
+coverage.out
+*.test
+
+# Go workspace/cache
+.coverprofile
+
+# Runtime data
+data/
+*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Docker overrides
+docker-compose.override.yml
+
+.gitignore exists in current directory. Continue?
+[backup (b) / overwrite (o) / cancel (c)] 

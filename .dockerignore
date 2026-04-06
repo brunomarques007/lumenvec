@@ -1,0 +1,13 @@
+.git
+.github
+data
+tests
+docs
+img
+*.exe
+*.log
+coverage.out
+Dockerfile*
+docker-compose*.yml
+README.md
+

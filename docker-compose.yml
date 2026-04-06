@@ -1,0 +1,18 @@
+services:
+  lumenvec:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lumenvec
+    ports:
+      - "19190:19190"
+    environment:
+      VECTOR_DB_PORT: "19190"
+      VECTOR_DB_SNAPSHOT_PATH: "/app/data/snapshot.json"
+      VECTOR_DB_WAL_PATH: "/app/data/wal.log"
+      VECTOR_DB_SEARCH_MODE: "exact"
+      VECTOR_DB_API_KEY: ""
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
