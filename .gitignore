@@ -8,15 +8,12 @@
 
 # Build artifacts
 bin/
+dist/
 build/
 coverage
 coverage.out
 *.out
 *.test
-
-# Release artifacts tracked for GitHub release downloads
-!dist/
-!dist/**
 
 # Go workspace/cache
 .coverprofile
