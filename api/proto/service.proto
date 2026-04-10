@@ -2,39 +2,91 @@ syntax = "proto3";
 
 package lumenvec;
 
+option go_package = "lumenvec/api/proto;lumenvecpb";
+
 service VectorService {
-    rpc AddVector(AddVectorRequest) returns (AddVectorResponse);
-    rpc SearchVector(SearchVectorRequest) returns (SearchVectorResponse);
-    rpc DeleteVector(DeleteVectorRequest) returns (DeleteVectorResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc AddVector(AddVectorRequest) returns (AddVectorResponse);
+  rpc AddVectorsBatch(AddVectorsBatchRequest) returns (AddVectorsBatchResponse);
+  rpc GetVector(GetVectorRequest) returns (GetVectorResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc SearchBatch(SearchBatchRequest) returns (SearchBatchResponse);
+  rpc DeleteVector(DeleteVectorRequest) returns (DeleteVectorResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+}
+
+message Vector {
+  string id = 1;
+  repeated double values = 2;
 }
 
 message AddVectorRequest {
-    string id = 1;
-    repeated float vector = 2;
+  string id = 1;
+  repeated double values = 2;
 }
 
 message AddVectorResponse {
-    bool success = 1;
+  bool success = 1;
 }
 
-message SearchVectorRequest {
-    repeated float vector = 1;
-    int32 top_k = 2;
+message AddVectorsBatchRequest {
+  repeated Vector vectors = 1;
 }
 
-message SearchVectorResponse {
-    repeated SearchResult results = 1;
+message AddVectorsBatchResponse {
+  bool success = 1;
+}
+
+message GetVectorRequest {
+  string id = 1;
+}
+
+message GetVectorResponse {
+  Vector vector = 1;
+}
+
+message SearchRequest {
+  repeated double values = 1;
+  int32 top_k = 2;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+}
+
+message SearchBatchQuery {
+  string id = 1;
+  repeated double values = 2;
+  int32 top_k = 3;
+}
+
+message SearchBatchRequest {
+  repeated SearchBatchQuery queries = 1;
+}
+
+message SearchBatchResult {
+  string id = 1;
+  repeated SearchResult results = 2;
+}
+
+message SearchBatchResponse {
+  repeated SearchBatchResult results = 1;
 }
 
 message SearchResult {
-    string id = 1;
-    float distance = 2;
+  string id = 1;
+  double distance = 2;
 }
 
 message DeleteVectorRequest {
-    string id = 1;
+  string id = 1;
 }
 
 message DeleteVectorResponse {
-    bool success = 1;
+  bool success = 1;
 }

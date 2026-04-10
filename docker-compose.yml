@@ -7,12 +7,45 @@ services:
     ports:
       - "19190:19190"
     environment:
+      VECTOR_DB_PROTOCOL: "http"
       VECTOR_DB_PORT: "19190"
       VECTOR_DB_SNAPSHOT_PATH: "/app/data/snapshot.json"
       VECTOR_DB_WAL_PATH: "/app/data/wal.log"
-      VECTOR_DB_SEARCH_MODE: "exact"
+      VECTOR_DB_SEARCH_MODE: "ann"
+      VECTOR_DB_ANN_PROFILE: "balanced"
+      VECTOR_DB_ANN_EVAL_SAMPLE_RATE: "10"
       VECTOR_DB_API_KEY: ""
     volumes:
       - ./data:/app/data
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: lumenvec-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./configs/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on:
+      - lumenvec
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: lumenvec-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./configs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped

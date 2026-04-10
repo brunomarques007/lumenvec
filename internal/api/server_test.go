@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"lumenvec/internal/core"
+
+	"google.golang.org/grpc"
 )
 
 func newAPITestServer(t *testing.T) *Server {
@@ -34,6 +37,12 @@ func TestApplyDefaults(t *testing.T) {
 	opts := applyDefaults(ServerOptions{})
 	if opts.Port != ":19190" || opts.SearchMode != "exact" {
 		t.Fatal("unexpected defaults")
+	}
+	if opts.Protocol != "http" || opts.GRPCEnabled {
+		t.Fatal("unexpected transport defaults")
+	}
+	if opts.ANNM != 16 || opts.ANNEfConstruct != 64 || opts.ANNEfSearch != 64 {
+		t.Fatal("unexpected ann defaults")
 	}
 }
 
@@ -168,6 +177,79 @@ func TestNewServerAndStart(t *testing.T) {
 	}
 }
 
+func TestServerStartWithGRPCEnabled(t *testing.T) {
+	server := newAPITestServer(t)
+	server.protocol = "grpc"
+	server.grpcEnabled = true
+	server.grpcPort = ":19191"
+
+	oldListen := listenAndServeFunc
+	oldFatal := logFatalfAPI
+	oldPrintf := logPrintfAPI
+	oldGRPCListen := grpcListenFunc
+	oldGRPCServe := grpcServeFunc
+	t.Cleanup(func() {
+		listenAndServeFunc = oldListen
+		logFatalfAPI = oldFatal
+		logPrintfAPI = oldPrintf
+		grpcListenFunc = oldGRPCListen
+		grpcServeFunc = oldGRPCServe
+	})
+
+	var grpcBound bool
+	grpcServed := make(chan struct{}, 1)
+	var fatalCalled bool
+	logPrintfAPI = func(string, ...interface{}) {}
+	logFatalfAPI = func(string, ...interface{}) { fatalCalled = true }
+	grpcListenFunc = func(network, address string) (net.Listener, error) {
+		grpcBound = true
+		return newStubListener(), nil
+	}
+	grpcServeFunc = func(*grpc.Server, net.Listener) error {
+		grpcServed <- struct{}{}
+		return net.ErrClosed
+	}
+	server.Start()
+	if !grpcBound {
+		t.Fatal("expected grpc listener to bind")
+	}
+	select {
+	case <-grpcServed:
+	case <-time.After(time.Second):
+		t.Fatal("expected grpc listener and server to start")
+	}
+	if fatalCalled {
+		t.Fatal("did not expect fatal path when grpc exits with net.ErrClosed")
+	}
+}
+
+func TestServerStartFailsWhenGRPCBindFails(t *testing.T) {
+	server := newAPITestServer(t)
+	server.protocol = "grpc"
+	server.grpcEnabled = true
+
+	oldListen := listenAndServeFunc
+	oldFatal := logFatalfAPI
+	oldPrintf := logPrintfAPI
+	oldGRPCListen := grpcListenFunc
+	t.Cleanup(func() {
+		listenAndServeFunc = oldListen
+		logFatalfAPI = oldFatal
+		logPrintfAPI = oldPrintf
+		grpcListenFunc = oldGRPCListen
+	})
+
+	var fatalCalled bool
+	logPrintfAPI = func(string, ...interface{}) {}
+	logFatalfAPI = func(string, ...interface{}) { fatalCalled = true }
+	grpcListenFunc = func(string, string) (net.Listener, error) { return nil, errors.New("grpc bind error") }
+
+	server.Start()
+	if !fatalCalled {
+		t.Fatal("expected grpc bind failure to trigger fatal path")
+	}
+}
+
 func TestServerHandlerErrorBranches(t *testing.T) {
 	server := newAPITestServer(t)
 
@@ -206,3 +288,11 @@ func TestServerHandlerErrorBranches(t *testing.T) {
 		t.Fatalf("expected 404, got %d", rec.Code)
 	}
 }
+
+type stubListener struct{}
+
+func newStubListener() net.Listener { return &stubListener{} }
+
+func (l *stubListener) Accept() (net.Conn, error) { return nil, errors.New("closed") }
+func (l *stubListener) Close() error              { return nil }
+func (l *stubListener) Addr() net.Addr            { return &net.TCPAddr{} }

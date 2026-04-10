@@ -1,16 +1,12 @@
 package core
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"lumenvec/internal/index"
 	"lumenvec/internal/index/ann"
@@ -23,6 +19,7 @@ var (
 	ErrVectorDimTooHigh = errors.New("vector dimension exceeds configured max")
 	ErrInvalidK         = errors.New("k must be greater than 0")
 	ErrKTooHigh         = errors.New("k exceeds configured max")
+	errSkipWALOp        = errors.New("skip wal op")
 )
 
 type SearchResult struct {
@@ -42,25 +39,101 @@ type BatchSearchResult struct {
 }
 
 type ServiceOptions struct {
-	MaxVectorDim  int
-	MaxK          int
-	SnapshotPath  string
-	WALPath       string
-	SnapshotEvery int
-	SearchMode    string
+	MaxVectorDim      int
+	MaxK              int
+	SnapshotPath      string
+	WALPath           string
+	SnapshotEvery     int
+	SearchMode        string
+	ANNProfile        string
+	ANNOptions        ann.Options
+	ANNEvalSampleRate int
+	VectorStore       string
+	VectorPath        string
+	Cache             CacheOptions
+}
+
+type VectorIndex interface {
+	AddVector(vec index.Vector) error
+	SearchVector(id string) (index.Vector, error)
+	DeleteVector(id string) error
+	ListVectors() []index.Vector
+	RangeVectors(fn func(index.Vector) bool)
+}
+
+type IDResolver interface {
+	Assign(id string) int
+	Lookup(internalID int) (string, bool)
+	Remove(id string)
+}
+
+type ServiceDeps struct {
+	Index       VectorIndex
+	VectorStore VectorStore
+	ANNIndex    *ann.AnnIndex
+	IDResolver  IDResolver
+	Persistence PersistenceBackend
 }
 
 type Service struct {
-	index         *index.Index
-	annIndex      *ann.AnnIndex
-	maxVectorDim  int
-	maxK          int
-	snapshotPath  string
-	walPath       string
-	snapshotEvery int
-	searchMode    string
-	persistOps    int
-	persistMu     sync.Mutex
+	index             VectorIndex
+	annIndex          *ann.AnnIndex
+	maxVectorDim      int
+	maxK              int
+	snapshotPath      string
+	walPath           string
+	snapshotEvery     int
+	searchMode        string
+	annProfile        string
+	annOptions        ann.Options
+	annEvalSampleRate int
+	persistOps        int
+	persistMu         sync.Mutex
+	vectorStore       VectorStore
+	idResolver        IDResolver
+	persistence       PersistenceBackend
+	stats             serviceStats
+}
+
+type ServiceStats struct {
+	SearchRequestsTotal    uint64 `json:"search_requests_total"`
+	ExactSearchesTotal     uint64 `json:"exact_searches_total"`
+	ANNSearchesTotal       uint64 `json:"ann_searches_total"`
+	ANNSearchHitsTotal     uint64 `json:"ann_search_hits_total"`
+	ANNSearchFallbacks     uint64 `json:"ann_search_fallbacks_total"`
+	ANNSearchErrorsTotal   uint64 `json:"ann_search_errors_total"`
+	ANNCandidatesReturned  uint64 `json:"ann_candidates_returned_total"`
+	ANNEvalSamplesTotal    uint64 `json:"ann_eval_samples_total"`
+	ANNEvalTop1Matches     uint64 `json:"ann_eval_top1_matches_total"`
+	ANNEvalOverlapResults  uint64 `json:"ann_eval_overlap_results_total"`
+	ANNEvalComparedResults uint64 `json:"ann_eval_compared_results_total"`
+	CacheHitsTotal         uint64 `json:"cache_hits_total"`
+	CacheMissesTotal       uint64 `json:"cache_misses_total"`
+	CacheEvictionsTotal    uint64 `json:"cache_evictions_total"`
+	CacheItems             uint64 `json:"cache_items"`
+	CacheBytes             uint64 `json:"cache_bytes"`
+	DiskFileBytes          uint64 `json:"disk_file_bytes"`
+	DiskRecords            uint64 `json:"disk_records"`
+	DiskStaleRecords       uint64 `json:"disk_stale_records"`
+	DiskCompactionsTotal   uint64 `json:"disk_compactions_total"`
+	ANNProfile             string `json:"ann_profile"`
+	ANNM                   int    `json:"ann_m"`
+	ANNEfConstruction      int    `json:"ann_ef_construction"`
+	ANNEfSearch            int    `json:"ann_ef_search"`
+}
+
+type serviceStats struct {
+	searchRequestsTotal    atomic.Uint64
+	exactSearchesTotal     atomic.Uint64
+	annSearchesTotal       atomic.Uint64
+	annSearchHitsTotal     atomic.Uint64
+	annSearchFallbacks     atomic.Uint64
+	annSearchErrorsTotal   atomic.Uint64
+	annCandidatesReturned  atomic.Uint64
+	annEvalSamplesTotal    atomic.Uint64
+	annEvalTop1Matches     atomic.Uint64
+	annEvalOverlapResults  atomic.Uint64
+	annEvalComparedResults atomic.Uint64
 }
 
 type walOp struct {
@@ -82,15 +155,42 @@ type topKAccumulator struct {
 }
 
 func NewService(opts ServiceOptions) *Service {
+	return NewServiceWithDeps(opts, ServiceDeps{})
+}
+
+func NewServiceWithDeps(opts ServiceOptions, deps ServiceDeps) *Service {
+	if deps.Index == nil {
+		deps.Index = index.NewIndex()
+	}
+	if deps.VectorStore == nil {
+		deps.VectorStore = newDefaultVectorStore(opts.VectorStore, opts.VectorPath)
+	}
+	deps.VectorStore = newCachedVectorStore(deps.VectorStore, opts.Cache)
+	if deps.ANNIndex == nil {
+		deps.ANNIndex = ann.NewAnnIndexWithOptions(opts.ANNOptions)
+	}
+	if deps.IDResolver == nil {
+		deps.IDResolver = newMemoryIDResolver()
+	}
+	if deps.Persistence == nil {
+		deps.Persistence = newSnapshotWALBackend(opts.SnapshotPath, opts.WALPath)
+	}
+
 	svc := &Service{
-		index:         index.NewIndex(),
-		annIndex:      ann.NewAnnIndex(),
-		maxVectorDim:  opts.MaxVectorDim,
-		maxK:          opts.MaxK,
-		snapshotPath:  opts.SnapshotPath,
-		walPath:       opts.WALPath,
-		snapshotEvery: opts.SnapshotEvery,
-		searchMode:    normalizeSearchMode(opts.SearchMode),
+		index:             deps.Index,
+		annIndex:          deps.ANNIndex,
+		maxVectorDim:      opts.MaxVectorDim,
+		maxK:              opts.MaxK,
+		snapshotPath:      opts.SnapshotPath,
+		walPath:           opts.WALPath,
+		snapshotEvery:     opts.SnapshotEvery,
+		searchMode:        normalizeSearchMode(opts.SearchMode),
+		annProfile:        normalizeANNProfile(opts.ANNProfile),
+		annOptions:        opts.ANNOptions,
+		annEvalSampleRate: clampPercent(opts.ANNEvalSampleRate),
+		vectorStore:       deps.VectorStore,
+		idResolver:        deps.IDResolver,
+		persistence:       deps.Persistence,
 	}
 
 	_ = svc.restoreState()
@@ -102,6 +202,7 @@ func (s *Service) AddVector(id string, values []float64) error {
 }
 
 func (s *Service) AddVectors(vectors []index.Vector) error {
+	s.ensureRuntimeDeps()
 	if len(vectors) == 0 {
 		return ErrInvalidValues
 	}
@@ -123,12 +224,18 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 			s.rollbackAddedVectors(addedIDs)
 			return fmt.Errorf("%w (%d)", ErrVectorDimTooHigh, s.maxVectorDim)
 		}
-
-		if err := s.index.AddVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
+		if err := s.vectorStore.UpsertVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
 			s.rollbackAddedVectors(addedIDs)
 			return err
 		}
-		_ = s.annIndex.AddVector(hashID(vec.ID), vec.Values)
+
+		if err := s.index.AddVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
+			_ = s.vectorStore.DeleteVector(vec.ID)
+			s.rollbackAddedVectors(addedIDs)
+			return err
+		}
+		internalID := s.idResolver.Assign(vec.ID)
+		_ = s.annIndex.AddVector(internalID, vec.Values)
 		addedIDs = append(addedIDs, vec.ID)
 	}
 
@@ -142,13 +249,15 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 }
 
 func (s *Service) GetVector(id string) (index.Vector, error) {
+	s.ensureRuntimeDeps()
 	if strings.TrimSpace(id) == "" {
 		return index.Vector{}, ErrInvalidID
 	}
-	return s.index.SearchVector(id)
+	return s.vectorStore.GetVector(id)
 }
 
 func (s *Service) DeleteVector(id string) error {
+	s.ensureRuntimeDeps()
 	if strings.TrimSpace(id) == "" {
 		return ErrInvalidID
 	}
@@ -156,16 +265,22 @@ func (s *Service) DeleteVector(id string) error {
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
 
-	vec, err := s.index.SearchVector(id)
+	vec, err := s.vectorStore.GetVector(id)
 	if err != nil {
 		return err
 	}
 	if err := s.index.DeleteVector(id); err != nil {
 		return err
 	}
+	if err := s.vectorStore.DeleteVector(id); err != nil {
+		_ = s.index.AddVector(vec)
+		return err
+	}
+	s.idResolver.Remove(id)
 	s.rebuildANNLocked()
 
 	if err := s.appendWAL(walOp{Op: "delete", ID: id}); err != nil {
+		_ = s.vectorStore.UpsertVector(vec)
 		_ = s.index.AddVector(vec)
 		s.rebuildANNLocked()
 		return err
@@ -174,20 +289,26 @@ func (s *Service) DeleteVector(id string) error {
 }
 
 func (s *Service) Search(values []float64, k int) ([]SearchResult, error) {
+	s.ensureRuntimeDeps()
 	if err := s.validateSearchRequest(values, k); err != nil {
 		return nil, err
 	}
+	s.stats.searchRequestsTotal.Add(1)
 
 	if s.searchMode == "ann" {
 		results, ok := s.searchANN(values, k)
 		if ok {
+			s.maybeEvaluateANN(values, k, results)
 			return results, nil
 		}
+		s.stats.annSearchFallbacks.Add(1)
 	}
+	s.stats.exactSearchesTotal.Add(1)
 	return s.searchExact(values, k), nil
 }
 
 func (s *Service) SearchBatch(queries []BatchSearchQuery) ([]BatchSearchResult, error) {
+	s.ensureRuntimeDeps()
 	if len(queries) == 0 {
 		return nil, ErrInvalidValues
 	}
@@ -270,21 +391,22 @@ func (s *Service) searchExact(values []float64, k int) []SearchResult {
 }
 
 func (s *Service) searchANN(values []float64, k int) ([]SearchResult, bool) {
-	idToVector := make(map[int]index.Vector)
-	s.index.RangeVectors(func(vec index.Vector) bool {
-		idToVector[hashID(vec.ID)] = vec
-		return true
-	})
-
+	s.stats.annSearchesTotal.Add(1)
 	ids, err := s.annIndex.Search(values, k)
 	if err != nil {
+		s.stats.annSearchErrorsTotal.Add(1)
 		return nil, false
 	}
+	s.stats.annCandidatesReturned.Add(uint64(len(ids)))
 
 	results := make([]SearchResult, 0, len(ids))
-	for _, hid := range ids {
-		vec, ok := idToVector[hid]
+	for _, internalID := range ids {
+		id, ok := s.idResolver.Lookup(internalID)
 		if !ok {
+			continue
+		}
+		vec, err := s.getVectorForRead(id)
+		if err != nil {
 			continue
 		}
 		dist := vector.EuclideanDistance(values, vec.Values)
@@ -296,6 +418,7 @@ func (s *Service) searchANN(values []float64, k int) ([]SearchResult, bool) {
 	if len(results) == 0 {
 		return nil, false
 	}
+	s.stats.annSearchHitsTotal.Add(1)
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Distance < results[j].Distance
 	})
@@ -303,6 +426,13 @@ func (s *Service) searchANN(values []float64, k int) ([]SearchResult, bool) {
 		results = results[:k]
 	}
 	return results, true
+}
+
+func (s *Service) getVectorForRead(id string) (index.Vector, error) {
+	if reader, ok := s.vectorStore.(readOnlyVectorReader); ok {
+		return reader.GetVectorReadOnly(id)
+	}
+	return s.vectorStore.GetVector(id)
 }
 
 func newTopKAccumulator(limit int) topKAccumulator {
@@ -358,12 +488,21 @@ func normalizeSearchMode(mode string) string {
 
 func (s *Service) rollbackAddedVectors(ids []string) {
 	for _, id := range ids {
+		_ = s.vectorStore.DeleteVector(id)
 		_ = s.index.DeleteVector(id)
 	}
 	s.rebuildANNLocked()
 }
 
 func (s *Service) restoreState() error {
+	s.ensureRuntimeDeps()
+	if s.usesPersistentVectorStore() {
+		if err := s.loadVectorStoreState(); err != nil {
+			return err
+		}
+		s.persistOps = 0
+		return nil
+	}
 	if err := s.loadSnapshot(); err != nil {
 		return err
 	}
@@ -381,88 +520,52 @@ func (s *Service) restoreState() error {
 }
 
 func (s *Service) saveSnapshot() error {
-	all := s.index.ListVectors()
-	payload := make(map[string][]float64, len(all))
-	for _, vec := range all {
-		payload[vec.ID] = append([]float64(nil), vec.Values...)
+	s.ensureRuntimeDeps()
+	if s.usesPersistentVectorStore() {
+		return nil
 	}
-
-	if err := os.MkdirAll(filepath.Dir(s.snapshotPath), 0o755); err != nil {
-		return err
-	}
-	tmp := s.snapshotPath + ".tmp"
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.snapshotPath)
+	return s.persistenceBackend().SaveSnapshot(s.vectorStore.ListVectors())
 }
 
 func (s *Service) appendWAL(op walOp) error {
-	if err := os.MkdirAll(filepath.Dir(s.walPath), 0o755); err != nil {
-		return err
+	s.ensureRuntimeDeps()
+	if s.usesPersistentVectorStore() {
+		return nil
 	}
-	f, err := os.OpenFile(s.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	data, err := json.Marshal(op)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return err
-	}
-	return f.Sync()
+	return s.persistenceBackend().AppendWAL(op)
 }
 
 func (s *Service) replayWAL() error {
-	f, err := os.Open(s.walPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var op walOp
-		if err := json.Unmarshal([]byte(line), &op); err != nil {
-			return err
-		}
+	s.ensureRuntimeDeps()
+	err := s.persistenceBackend().ReplayWAL(func(op walOp) error {
 		switch op.Op {
 		case "upsert":
 			if op.ID == "" || len(op.Values) == 0 || len(op.Values) > s.maxVectorDim {
-				continue
+				return errSkipWALOp
 			}
 			vec := index.Vector{ID: op.ID, Values: op.Values}
+			if err := s.vectorStore.UpsertVector(vec); err != nil {
+				return err
+			}
 			if err := s.index.AddVector(vec); err != nil {
 				if errors.Is(err, index.ErrVectorExists) {
+					_ = s.vectorStore.UpsertVector(vec)
 					_ = s.index.DeleteVector(op.ID)
 					_ = s.index.AddVector(vec)
-					continue
+					return nil
 				}
 				return err
 			}
 		case "delete":
 			if op.ID == "" {
-				continue
+				return errSkipWALOp
 			}
+			_ = s.vectorStore.DeleteVector(op.ID)
 			_ = s.index.DeleteVector(op.ID)
 		}
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	s.rebuildANNLocked()
@@ -470,13 +573,19 @@ func (s *Service) replayWAL() error {
 }
 
 func (s *Service) truncateWAL() error {
-	if err := os.MkdirAll(filepath.Dir(s.walPath), 0o755); err != nil {
-		return err
+	s.ensureRuntimeDeps()
+	if s.usesPersistentVectorStore() {
+		return nil
 	}
-	return os.WriteFile(s.walPath, []byte{}, 0o644)
+	return s.persistenceBackend().TruncateWAL()
 }
 
 func (s *Service) maybeSnapshot() error {
+	s.ensureRuntimeDeps()
+	if s.usesPersistentVectorStore() {
+		s.persistOps = 0
+		return nil
+	}
 	s.persistOps++
 	if s.persistOps < s.snapshotEvery {
 		return nil
@@ -492,38 +601,202 @@ func (s *Service) maybeSnapshot() error {
 }
 
 func (s *Service) loadSnapshot() error {
-	data, err := os.ReadFile(s.snapshotPath)
+	s.ensureRuntimeDeps()
+	payload, err := s.persistenceBackend().LoadSnapshot()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var payload map[string][]float64
-	if err := json.Unmarshal(data, &payload); err != nil {
 		return err
 	}
 	for id, values := range payload {
 		if id == "" || len(values) == 0 || len(values) > s.maxVectorDim {
 			continue
 		}
+		if err := s.vectorStore.UpsertVector(index.Vector{ID: id, Values: values}); err != nil {
+			return err
+		}
 		if err := s.index.AddVector(index.Vector{ID: id, Values: values}); err != nil && !errors.Is(err, index.ErrVectorExists) {
 			return err
 		}
-		_ = s.annIndex.AddVector(hashID(id), values)
+		internalID := s.idResolver.Assign(id)
+		_ = s.annIndex.AddVector(internalID, values)
 	}
 	return nil
 }
 
-func hashID(id string) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(id))
-	return int(h.Sum32())
+func (s *Service) rebuildANNLocked() {
+	s.ensureRuntimeDeps()
+	s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
+	for _, vec := range s.index.ListVectors() {
+		internalID := s.idResolver.Assign(vec.ID)
+		_ = s.annIndex.AddVector(internalID, vec.Values)
+	}
 }
 
-func (s *Service) rebuildANNLocked() {
-	s.annIndex = ann.NewAnnIndex()
-	for _, vec := range s.index.ListVectors() {
-		_ = s.annIndex.AddVector(hashID(vec.ID), vec.Values)
+func (s *Service) loadVectorStoreState() error {
+	s.ensureRuntimeDeps()
+	for _, vec := range s.vectorStore.ListVectors() {
+		if vec.ID == "" || len(vec.Values) == 0 || len(vec.Values) > s.maxVectorDim {
+			continue
+		}
+		if err := s.index.AddVector(vec); err != nil && !errors.Is(err, index.ErrVectorExists) {
+			return err
+		}
+		internalID := s.idResolver.Assign(vec.ID)
+		if err := s.annIndex.AddVector(internalID, vec.Values); err != nil {
+			continue
+		}
 	}
+	return nil
+}
+
+func (s *Service) Stats() ServiceStats {
+	stats := ServiceStats{
+		SearchRequestsTotal:    s.stats.searchRequestsTotal.Load(),
+		ExactSearchesTotal:     s.stats.exactSearchesTotal.Load(),
+		ANNSearchesTotal:       s.stats.annSearchesTotal.Load(),
+		ANNSearchHitsTotal:     s.stats.annSearchHitsTotal.Load(),
+		ANNSearchFallbacks:     s.stats.annSearchFallbacks.Load(),
+		ANNSearchErrorsTotal:   s.stats.annSearchErrorsTotal.Load(),
+		ANNCandidatesReturned:  s.stats.annCandidatesReturned.Load(),
+		ANNEvalSamplesTotal:    s.stats.annEvalSamplesTotal.Load(),
+		ANNEvalTop1Matches:     s.stats.annEvalTop1Matches.Load(),
+		ANNEvalOverlapResults:  s.stats.annEvalOverlapResults.Load(),
+		ANNEvalComparedResults: s.stats.annEvalComparedResults.Load(),
+		ANNProfile:             normalizeANNProfile(s.annProfile),
+		ANNM:                   s.annOptions.M,
+		ANNEfConstruction:      s.annOptions.EfConstruction,
+		ANNEfSearch:            s.annOptions.EfSearch,
+	}
+	if cacheStatsReader, ok := s.vectorStore.(interface{ Stats() CacheStats }); ok {
+		cacheStats := cacheStatsReader.Stats()
+		stats.CacheHitsTotal = cacheStats.Hits
+		stats.CacheMissesTotal = cacheStats.Misses
+		stats.CacheEvictionsTotal = cacheStats.Evictions
+		stats.CacheItems = cacheStats.Items
+		stats.CacheBytes = cacheStats.Bytes
+	}
+	if diskStatsReader, ok := s.vectorStore.(diskStatsReader); ok {
+		diskStats := diskStatsReader.DiskStats()
+		stats.DiskFileBytes = diskStats.FileBytes
+		stats.DiskRecords = diskStats.Records
+		stats.DiskStaleRecords = diskStats.StaleRecords
+		stats.DiskCompactionsTotal = diskStats.Compactions
+	}
+	return stats
+}
+
+func (s *Service) Close() error {
+	if closer, ok := s.vectorStore.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func (s *Service) ensureRuntimeDeps() {
+	if s.index == nil {
+		s.index = index.NewIndex()
+	}
+	if s.vectorStore == nil {
+		s.vectorStore = newMemoryVectorStore()
+	}
+	if s.annIndex == nil {
+		s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
+	}
+	if s.idResolver == nil {
+		s.idResolver = newMemoryIDResolver()
+	}
+	if s.persistence == nil {
+		s.persistence = newSnapshotWALBackend(s.snapshotPath, s.walPath)
+	}
+}
+
+func (s *Service) persistenceBackend() PersistenceBackend {
+	if backend, ok := s.persistence.(*snapshotWALBackend); ok {
+		if backend.snapshotPath != s.snapshotPath || backend.walPath != s.walPath {
+			s.persistence = newSnapshotWALBackend(s.snapshotPath, s.walPath)
+		}
+	}
+	if s.persistence == nil {
+		return newSnapshotWALBackend(s.snapshotPath, s.walPath)
+	}
+	return s.persistence
+}
+
+func (s *Service) usesPersistentVectorStore() bool {
+	persistent, ok := s.vectorStore.(persistentVectorStore)
+	return ok && persistent.IsPersistent()
+}
+
+func newDefaultVectorStore(mode, path string) VectorStore {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "disk", "file":
+		if strings.TrimSpace(path) == "" {
+			path = "./data/vectors"
+		}
+		return newFileVectorStore(path)
+	default:
+		return newMemoryVectorStore()
+	}
+}
+
+func normalizeANNProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "fast":
+		return "fast"
+	case "quality":
+		return "quality"
+	case "custom":
+		return "custom"
+	default:
+		return "balanced"
+	}
+}
+
+func clampPercent(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+func (s *Service) shouldEvaluateANN() bool {
+	if s.annEvalSampleRate <= 0 {
+		return false
+	}
+	n := s.stats.annSearchesTotal.Load()
+	return int(n%100) < s.annEvalSampleRate
+}
+
+func (s *Service) maybeEvaluateANN(values []float64, k int, annResults []SearchResult) {
+	if !s.shouldEvaluateANN() {
+		return
+	}
+	exactResults := s.searchExact(values, k)
+	s.stats.annEvalSamplesTotal.Add(1)
+	if len(annResults) > 0 && len(exactResults) > 0 && annResults[0].ID == exactResults[0].ID {
+		s.stats.annEvalTop1Matches.Add(1)
+	}
+
+	exactIDs := make(map[string]struct{}, len(exactResults))
+	for _, result := range exactResults {
+		exactIDs[result.ID] = struct{}{}
+	}
+	compared := minInt(len(annResults), len(exactResults))
+	overlap := 0
+	for _, result := range annResults {
+		if _, ok := exactIDs[result.ID]; ok {
+			overlap++
+		}
+	}
+	s.stats.annEvalOverlapResults.Add(uint64(overlap))
+	s.stats.annEvalComparedResults.Add(uint64(compared))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

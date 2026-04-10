@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,7 +87,7 @@ func TestMetricsRegistryAndStatusRecorder(t *testing.T) {
 	if sr.status != http.StatusAccepted {
 		t.Fatal("expected updated status")
 	}
-	total, duration, registry := newMetricsRegistry()
+	total, duration, registry := newMetricsRegistry(nil)
 	if total == nil || duration == nil || registry == nil {
 		t.Fatal("expected metrics registry")
 	}
@@ -142,5 +143,132 @@ func TestMiddlewarePublicPathsAndAccessLog(t *testing.T) {
 	req.RemoteAddr = "10.0.0.1:9999"
 	if got := getClientIP(req); got != "10.0.0.1" {
 		t.Fatalf("unexpected client ip %q", got)
+	}
+}
+
+func TestMetricsEndpointExposesCoreStats(t *testing.T) {
+	base := t.TempDir()
+	server := NewServerWithOptions(ServerOptions{
+		Port:              ":0",
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		MaxVectorDim:      8,
+		MaxK:              5,
+		SnapshotPath:      filepath.Join(base, "snapshot.json"),
+		WALPath:           filepath.Join(base, "wal.log"),
+		SnapshotEvery:     2,
+		SearchMode:        "ann",
+		ANNProfile:        "balanced",
+		ANNEvalSampleRate: 100,
+		CacheEnabled:      true,
+		CacheMaxBytes:     2048,
+		CacheMaxItems:     2,
+		CacheTTL:          time.Minute,
+	})
+	t.Cleanup(func() { _ = server.service.Close() })
+
+	if err := server.service.AddVector("a", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.service.Search([]float64{1, 2, 3}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.service.GetVector("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.service.GetVector("a"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	for _, metric := range []string{
+		"lumenvec_core_search_requests_total",
+		"lumenvec_core_ann_searches_total",
+		"lumenvec_core_ann_search_hits_total",
+		"lumenvec_core_ann_candidates_returned_total",
+		"lumenvec_core_ann_eval_samples_total",
+		"lumenvec_core_ann_eval_top1_matches_total",
+		"lumenvec_core_ann_eval_overlap_results_total",
+		"lumenvec_core_ann_eval_compared_results_total",
+		"lumenvec_core_cache_hits_total",
+		"lumenvec_core_cache_misses_total",
+		"lumenvec_core_cache_items",
+		"lumenvec_core_cache_bytes",
+		"lumenvec_core_ann_config_info",
+	} {
+		if !strings.Contains(body, metric) {
+			t.Fatalf("expected metrics output to contain %q", metric)
+		}
+	}
+}
+
+func TestMetricsEndpointExposesDiskStoreStats(t *testing.T) {
+	base := t.TempDir()
+	server := NewServerWithOptions(ServerOptions{
+		Port:           ":0",
+		ReadTimeout:    5 * time.Second,
+		WriteTimeout:   5 * time.Second,
+		MaxVectorDim:   8,
+		MaxK:           5,
+		SnapshotPath:   filepath.Join(base, "snapshot.json"),
+		WALPath:        filepath.Join(base, "wal.log"),
+		SnapshotEvery:  2,
+		SearchMode:     "ann",
+		ANNProfile:     "quality",
+		ANNM:           24,
+		ANNEfConstruct: 96,
+		ANNEfSearch:    96,
+		VectorStore:    "disk",
+		VectorPath:     filepath.Join(base, "vectors"),
+	})
+	t.Cleanup(func() { _ = server.service.Close() })
+
+	for i := 0; i < 6; i++ {
+		id := "vec-" + string(rune('a'+i))
+		if err := server.service.AddVector(id, []float64{float64(i), 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 0 {
+			if err := server.service.DeleteVector(id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := server.service.AddVector("steady", []float64{9, 9, 9}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	stats := server.service.Stats()
+	if stats.ANNProfile != "quality" {
+		t.Fatalf("expected service stats ann profile quality, got %q", stats.ANNProfile)
+	}
+	for _, metric := range []string{
+		"lumenvec_core_disk_file_bytes",
+		"lumenvec_core_disk_records",
+		"lumenvec_core_disk_stale_records",
+		"lumenvec_core_disk_compactions_total",
+		"lumenvec_core_ann_config_info",
+	} {
+		if !strings.Contains(body, metric) {
+			t.Fatalf("expected metrics output to contain %q", metric)
+		}
+	}
+	if !strings.Contains(body, "quality") {
+		t.Fatal("expected ann config metric output to include the configured profile")
 	}
 }

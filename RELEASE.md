@@ -1,5 +1,29 @@
 # Release Notes
 
+## v0.2.0
+
+Release focused on the new runtime architecture, transport split, disk-backed payload mode, observability, and packaging for real deployment.
+
+### Highlights
+- Added gRPC transport, Go client support, and protobuf API coverage
+- Introduced exclusive transport selection with `server.protocol=http|grpc`
+- Added disk-backed payload storage with append-only binary data and compaction
+- Added configurable in-memory cache for hot vectors
+- Added Prometheus, Grafana, alert rules, validation scripts, and sample traffic generation
+- Prepared release assets for HTTP and gRPC runtime bundles
+
+### Included in this release
+- New `configs/config.yaml` for HTTP mode
+- New `configs/config.grpc.yaml` for gRPC mode
+- Release packaging scripts producing transport-specific archives
+- GitHub release workflow uploading packaged binaries as release assets
+- Documentation updates for configuration, observability, architecture, and runtime usage
+
+### Suggested tag
+```bash
+git tag -a v0.2.0 -m "LumenVec v0.2.0"
+```
+
 ## v0.1.1
 
 Patch release focused on test coverage enforcement and CI reliability.

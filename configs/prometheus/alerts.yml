@@ -1,0 +1,57 @@
+groups:
+  - name: lumenvec-ann
+    rules:
+      - alert: LumenVecANNFallbackRateHigh
+        expr: |
+          (
+            rate(lumenvec_core_ann_fallbacks_total[10m])
+            /
+            clamp_min(rate(lumenvec_core_ann_searches_total[10m]), 0.0001)
+          ) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LumenVec ANN fallback rate is high"
+          description: "More than 10% of ANN searches are falling back to exact search over the last 10 minutes."
+
+      - alert: LumenVecANNTop1RecallLow
+        expr: |
+          (
+            rate(lumenvec_core_ann_eval_top1_matches_total[15m])
+            /
+            clamp_min(rate(lumenvec_core_ann_eval_samples_total[15m]), 0.0001)
+          ) < 0.80
+          and
+          rate(lumenvec_core_ann_eval_samples_total[15m]) > 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LumenVec ANN top-1 match rate is low"
+          description: "Sampled ANN searches are matching exact top-1 results less than 80% of the time over the last 15 minutes."
+
+      - alert: LumenVecANNOverlapLow
+        expr: |
+          (
+            rate(lumenvec_core_ann_eval_overlap_results_total[15m])
+            /
+            clamp_min(rate(lumenvec_core_ann_eval_compared_results_total[15m]), 0.0001)
+          ) < 0.75
+          and
+          rate(lumenvec_core_ann_eval_compared_results_total[15m]) > 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LumenVec ANN overlap with exact search is low"
+          description: "Sampled ANN searches have less than 75% result overlap with exact search over the last 15 minutes."
+
+      - alert: LumenVecDiskStoreCompactionPressureHigh
+        expr: lumenvec_core_disk_stale_records > (lumenvec_core_disk_records * 2)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LumenVec disk store stale record pressure is high"
+          description: "The disk-backed vector store is carrying more than twice as many stale records as live records."

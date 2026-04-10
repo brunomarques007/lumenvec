@@ -22,6 +22,7 @@ func TestBuildServer(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(`
 server:
+  protocol: "grpc"
   port: 19190
   read_timeout: 5s
   write_timeout: 6s
@@ -29,12 +30,22 @@ database:
   snapshot_path: "./data/snapshot.json"
   wal_path: "./data/wal.log"
   snapshot_every: 10
+  cache_enabled: true
+  cache_max_bytes: 4096
+  cache_max_items: 50
+  cache_ttl: 20s
 limits:
   max_body_bytes: 1024
   max_vector_dim: 64
   max_k: 5
 search:
   mode: "exact"
+  ann_m: 20
+  ann_ef_construction: 80
+  ann_ef_search: 40
+grpc:
+  enabled: true
+  port: 20191
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -62,10 +73,16 @@ func TestExecute(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(`
 server:
+  protocol: "http"
   port: 19190
 database:
   snapshot_path: "./data/snapshot.json"
   wal_path: "./data/wal.log"
+  cache_enabled: false
+  cache_max_bytes: 1024
+grpc:
+  enabled: false
+  port: 19191
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -123,10 +140,12 @@ func TestMustExecuteAndMain(t *testing.T) {
 	oldFatalf := logFatalf
 	oldInfof := logInfof
 	oldExecute := executeFunc
+	oldArgs := os.Args
 	t.Cleanup(func() {
 		logFatalf = oldFatalf
 		logInfof = oldInfof
 		executeFunc = oldExecute
+		os.Args = oldArgs
 	})
 
 	var fatalCalled bool
@@ -139,8 +158,19 @@ func TestMustExecuteAndMain(t *testing.T) {
 	var infoCalled bool
 	executeFunc = func(string, func(serverRunner)) error { return nil }
 	logInfof = func(...interface{}) { infoCalled = true }
+	os.Args = []string{"lumenvec"}
 	main()
 	if !infoCalled {
 		t.Fatal("expected info log path")
+	}
+}
+
+func TestResolveConfigPath(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	os.Args = []string{"lumenvec", "-config", "custom.yaml"}
+	if got := resolveConfigPath(); got != "custom.yaml" {
+		t.Fatalf("resolveConfigPath() = %q", got)
 	}
 }

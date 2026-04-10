@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"lumenvec/internal/core"
 	"lumenvec/internal/index"
+	"lumenvec/internal/index/ann"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,7 +26,10 @@ var (
 
 type Server struct {
 	router       *mux.Router
+	protocol     string
 	port         string
+	grpcPort     string
+	grpcEnabled  bool
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	service      *core.Service
@@ -62,33 +67,61 @@ type batchSearchRequest struct {
 }
 
 type ServerOptions struct {
-	Port          string
-	ReadTimeout   time.Duration
-	WriteTimeout  time.Duration
-	MaxBodyBytes  int64
-	MaxVectorDim  int
-	MaxK          int
-	SnapshotPath  string
-	WALPath       string
-	SnapshotEvery int
-	APIKey        string
-	RateLimitRPS  int
-	SearchMode    string
+	Protocol          string
+	Port              string
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	MaxBodyBytes      int64
+	MaxVectorDim      int
+	MaxK              int
+	SnapshotPath      string
+	WALPath           string
+	SnapshotEvery     int
+	VectorStore       string
+	VectorPath        string
+	APIKey            string
+	RateLimitRPS      int
+	SearchMode        string
+	ANNProfile        string
+	ANNM              int
+	ANNEfConstruct    int
+	ANNEfSearch       int
+	ANNEvalSampleRate int
+	CacheEnabled      bool
+	CacheMaxBytes     int64
+	CacheMaxItems     int
+	CacheTTL          time.Duration
+	GRPCEnabled       bool
+	GRPCPort          string
 }
 
 var defaultServerOptions = ServerOptions{
-	Port:          ":19190",
-	ReadTimeout:   10 * time.Second,
-	WriteTimeout:  10 * time.Second,
-	MaxBodyBytes:  1 << 20,
-	MaxVectorDim:  4096,
-	MaxK:          100,
-	SnapshotPath:  "./data/snapshot.json",
-	WALPath:       "./data/wal.log",
-	SnapshotEvery: 25,
-	APIKey:        "",
-	RateLimitRPS:  100,
-	SearchMode:    "exact",
+	Protocol:          "http",
+	Port:              ":19190",
+	ReadTimeout:       10 * time.Second,
+	WriteTimeout:      10 * time.Second,
+	MaxBodyBytes:      1 << 20,
+	MaxVectorDim:      4096,
+	MaxK:              100,
+	SnapshotPath:      "./data/snapshot.json",
+	WALPath:           "./data/wal.log",
+	SnapshotEvery:     25,
+	VectorStore:       "memory",
+	VectorPath:        "./data/vectors",
+	APIKey:            "",
+	RateLimitRPS:      100,
+	SearchMode:        "exact",
+	ANNProfile:        "balanced",
+	ANNM:              16,
+	ANNEfConstruct:    64,
+	ANNEfSearch:       64,
+	ANNEvalSampleRate: 0,
+	CacheEnabled:      false,
+	CacheMaxBytes:     8 << 20,
+	CacheMaxItems:     1024,
+	CacheTTL:          15 * time.Minute,
+	GRPCEnabled:       false,
+	GRPCPort:          ":19191",
 }
 
 func NewServer(port string) *Server {
@@ -104,7 +137,10 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 
 	s := &Server{
 		router:       mux.NewRouter(),
+		protocol:     opts.Protocol,
 		port:         opts.Port,
+		grpcPort:     opts.GRPCPort,
+		grpcEnabled:  opts.GRPCEnabled,
 		readTimeout:  opts.ReadTimeout,
 		writeTimeout: opts.WriteTimeout,
 		service: core.NewService(core.ServiceOptions{
@@ -114,22 +150,44 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 			WALPath:       opts.WALPath,
 			SnapshotEvery: opts.SnapshotEvery,
 			SearchMode:    opts.SearchMode,
+			ANNProfile:    opts.ANNProfile,
+			ANNOptions: ann.Options{
+				M:              opts.ANNM,
+				EfConstruction: opts.ANNEfConstruct,
+				EfSearch:       opts.ANNEfSearch,
+			},
+			ANNEvalSampleRate: opts.ANNEvalSampleRate,
+			VectorStore:       opts.VectorStore,
+			VectorPath:        opts.VectorPath,
+			Cache: core.CacheOptions{
+				Enabled:  opts.CacheEnabled,
+				MaxBytes: opts.CacheMaxBytes,
+				MaxItems: opts.CacheMaxItems,
+				TTL:      opts.CacheTTL,
+			},
 		}),
 		maxBodyBytes: opts.MaxBodyBytes,
 		apiKey:       opts.APIKey,
 		rateLimiter:  newRateLimiter(opts.RateLimitRPS, time.Second),
 	}
-	s.requestTotal, s.requestDuration, s.metricsRegistry = newMetricsRegistry()
+	s.requestTotal, s.requestDuration, s.metricsRegistry = newMetricsRegistry(s.service)
 	s.routes()
 	return s
 }
 
 func applyDefaults(opts ServerOptions) ServerOptions {
+	opts.Protocol = normalizeServerProtocol(opts.Protocol)
 	if strings.TrimSpace(opts.Port) == "" {
 		opts.Port = defaultServerOptions.Port
 	}
 	if !strings.HasPrefix(opts.Port, ":") {
 		opts.Port = ":" + opts.Port
+	}
+	if strings.TrimSpace(opts.GRPCPort) == "" {
+		opts.GRPCPort = defaultServerOptions.GRPCPort
+	}
+	if !strings.HasPrefix(opts.GRPCPort, ":") {
+		opts.GRPCPort = ":" + opts.GRPCPort
 	}
 	if opts.ReadTimeout <= 0 {
 		opts.ReadTimeout = defaultServerOptions.ReadTimeout
@@ -152,6 +210,12 @@ func applyDefaults(opts ServerOptions) ServerOptions {
 	if strings.TrimSpace(opts.WALPath) == "" {
 		opts.WALPath = defaultServerOptions.WALPath
 	}
+	if strings.TrimSpace(opts.VectorStore) == "" {
+		opts.VectorStore = defaultServerOptions.VectorStore
+	}
+	if strings.TrimSpace(opts.VectorPath) == "" {
+		opts.VectorPath = defaultServerOptions.VectorPath
+	}
 	if opts.SnapshotEvery <= 0 {
 		opts.SnapshotEvery = defaultServerOptions.SnapshotEvery
 	}
@@ -161,11 +225,45 @@ func applyDefaults(opts ServerOptions) ServerOptions {
 	if strings.TrimSpace(opts.SearchMode) == "" {
 		opts.SearchMode = defaultServerOptions.SearchMode
 	}
+	if strings.TrimSpace(opts.ANNProfile) == "" {
+		opts.ANNProfile = defaultServerOptions.ANNProfile
+	}
+	if opts.ANNM <= 0 {
+		opts.ANNM = defaultServerOptions.ANNM
+	}
+	if opts.ANNEfConstruct <= 0 {
+		opts.ANNEfConstruct = defaultServerOptions.ANNEfConstruct
+	}
+	if opts.ANNEfSearch <= 0 {
+		opts.ANNEfSearch = defaultServerOptions.ANNEfSearch
+	}
+	if opts.ANNEvalSampleRate < 0 {
+		opts.ANNEvalSampleRate = defaultServerOptions.ANNEvalSampleRate
+	}
+	if opts.CacheMaxItems <= 0 {
+		opts.CacheMaxItems = defaultServerOptions.CacheMaxItems
+	}
+	if opts.CacheMaxBytes <= 0 {
+		opts.CacheMaxBytes = defaultServerOptions.CacheMaxBytes
+	}
+	if opts.CacheTTL <= 0 {
+		opts.CacheTTL = defaultServerOptions.CacheTTL
+	}
+	opts.GRPCEnabled = opts.Protocol == "grpc"
 	opts.SearchMode = strings.ToLower(strings.TrimSpace(opts.SearchMode))
 	if opts.SearchMode != "ann" {
 		opts.SearchMode = "exact"
 	}
 	return opts
+}
+
+func normalizeServerProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "grpc":
+		return "grpc"
+	default:
+		return "http"
+	}
 }
 
 func (s *Server) routes() {
@@ -305,7 +403,22 @@ func (s *Server) SearchVectorsBatchHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) Start() {
-	logPrintfAPI("Starting server on port %s", s.port)
+	if s.grpcEnabled {
+		logPrintfAPI("Starting gRPC server on port %s", s.grpcPort)
+		listener, err := s.grpcListener()
+		if err != nil {
+			logFatalfAPI("Could not bind gRPC server: %s", err)
+			return
+		}
+		if err := s.serveGRPC(listener); err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			logFatalfAPI("Could not start gRPC server: %s", err)
+		}
+		return
+	}
+	logPrintfAPI("Starting HTTP server on port %s", s.port)
 	server := s.httpServer()
 	if err := listenAndServeFunc(server); err != nil {
 		logFatalfAPI("Could not start server: %s", err)

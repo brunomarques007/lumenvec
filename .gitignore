@@ -10,6 +10,7 @@
 bin/
 dist/
 build/
+tools/protoc/
 coverage
 coverage.out
 *.out

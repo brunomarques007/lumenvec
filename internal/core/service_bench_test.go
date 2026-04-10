@@ -63,6 +63,94 @@ func BenchmarkServiceSearch(b *testing.B) {
 	}
 }
 
+func BenchmarkServiceGetVector(b *testing.B) {
+	svc := benchmarkService(b, "exact")
+	if err := svc.AddVector("vec-0", benchmarkVector(256, 1)); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := svc.GetVector("vec-0"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkServiceGetVectorByStore(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		store string
+		cache CacheOptions
+	}{
+		{name: "memory", store: "memory"},
+		{name: "disk", store: "disk"},
+		{
+			name:  "disk_cache",
+			store: "disk",
+			cache: CacheOptions{Enabled: true, MaxBytes: 8 << 20, MaxItems: 1024},
+		},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			svc := benchmarkServiceWithStore(b, "exact", tc.store, tc.cache)
+			if err := svc.AddVector("vec-0", benchmarkVector(256, 1)); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := svc.GetVector("vec-0"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkServiceSearchByStore(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		store string
+		cache CacheOptions
+	}{
+		{name: "exact_memory", mode: "exact", store: "memory"},
+		{name: "exact_disk", mode: "exact", store: "disk"},
+		{name: "ann_disk", mode: "ann", store: "disk"},
+		{
+			name:  "ann_disk_cache",
+			mode:  "ann",
+			store: "disk",
+			cache: CacheOptions{Enabled: true, MaxBytes: 8 << 20, MaxItems: 1024},
+		},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			svc := benchmarkServiceWithStore(b, tc.mode, tc.store, tc.cache)
+			vectors := make([]index.Vector, 0, 512)
+			for i := 0; i < 512; i++ {
+				vectors = append(vectors, index.Vector{
+					ID:     fmt.Sprintf("vec-%d", i),
+					Values: benchmarkVector(256, float64(i%13)),
+				})
+			}
+			if err := svc.AddVectors(vectors); err != nil {
+				b.Fatal(err)
+			}
+
+			query := benchmarkVector(256, 3)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := svc.Search(query, 10); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkServiceSearchBatch(b *testing.B) {
 	svc := benchmarkService(b, "exact")
 	vectors := make([]index.Vector, 0, 512)
@@ -143,16 +231,25 @@ func BenchmarkServiceSearchBatchScales(b *testing.B) {
 }
 
 func benchmarkService(tb testing.TB, mode string) *Service {
+	return benchmarkServiceWithStore(tb, mode, "memory", CacheOptions{})
+}
+
+func benchmarkServiceWithStore(tb testing.TB, mode, store string, cache CacheOptions) *Service {
 	tb.Helper()
 	base := tb.TempDir()
-	return NewService(ServiceOptions{
+	svc := NewService(ServiceOptions{
 		MaxVectorDim:  1024,
 		MaxK:          64,
 		SnapshotPath:  filepath.Join(base, "snapshot.json"),
 		WALPath:       filepath.Join(base, "wal.log"),
 		SnapshotEvery: 1 << 30,
 		SearchMode:    mode,
+		VectorStore:   store,
+		VectorPath:    filepath.Join(base, "vectors"),
+		Cache:         cache,
 	})
+	tb.Cleanup(func() { _ = svc.Close() })
+	return svc
 }
 
 func benchmarkVector(dim int, seed float64) []float64 {

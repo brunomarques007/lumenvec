@@ -3,14 +3,16 @@
 [![CI](https://github.com/brunomarques007/lumenvec/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomarques007/lumenvec/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-LumenVec is an HTTP-first vector database written in Go, built for simple deployment, batch-oriented search workloads, and iterative performance tuning.
+LumenVec is a vector database written in Go, built for simple deployment, batch-oriented search workloads, and iterative performance tuning across HTTP and gRPC.
 
-It currently provides a Go-native core with local `snapshot + WAL` persistence, `exact` and `ann` search modes, Prometheus metrics, and Docker-ready packaging.
+It currently provides a Go-native core with local persistence, a configurable in-memory hot-vector cache, `exact` and `ann` search modes, Prometheus metrics, exclusive HTTP or gRPC transport selection per process, and Docker-ready packaging.
 
 ## Highlights
-- HTTP-first API for `upsert`, `get`, `delete`, `search`, and batch operations
+- HTTP and gRPC APIs for `upsert`, `get`, `delete`, `search`, and batch operations
+- explicit transport selection so one process runs either HTTP or gRPC, not both
 - Go-native core extracted from the transport layer
-- Local persistence with recovery from `snapshot` and `wal`
+- Local persistence through `snapshot + WAL` or disk-backed payload files
+- Configurable in-memory cache with TTL and memory/item limits
 - `exact` and `ann` search modes
 - Batch ingest and batch search endpoints
 - Configurable payload, dimension, and `top-k` limits
@@ -19,7 +21,7 @@ It currently provides a Go-native core with local `snapshot + WAL` persistence, 
 - Docker image and `docker compose` example
 
 ## Requirements
-- Go `1.23+` for local development
+- Go `1.24+` for local development
 - Docker and Docker Compose for container-based execution
 - Linux, macOS, or Windows
 
@@ -37,6 +39,7 @@ Default server:
 - URL: `http://localhost:19190`
 - Health: `http://localhost:19190/health`
 - Metrics: `http://localhost:19190/metrics`
+- gRPC: `localhost:19191` when `server.protocol=grpc`
 
 ### Run with the helper script
 ```bash
@@ -62,8 +65,11 @@ docker compose up --build
 
 The `docker-compose.yml` example:
 - publishes port `19190`
+- publishes port `9090` for Prometheus
+- publishes port `3000` for Grafana
 - persists data in `./data`
-- injects baseline environment variables
+- injects baseline environment variables for HTTP mode
+- provisions Prometheus scraping and a Grafana dashboard
 
 To stop it:
 ```bash
@@ -76,6 +82,7 @@ Default config file: `configs/config.yaml`
 
 ```yaml
 server:
+  protocol: "http"
   port: 19190
   read_timeout: 10s
   write_timeout: 10s
@@ -86,6 +93,12 @@ database:
   snapshot_path: "./data/snapshot.json"
   wal_path: "./data/wal.log"
   snapshot_every: 25
+  vector_store: "memory"
+  vector_path: "./data/vectors"
+  cache_enabled: false
+  cache_max_bytes: 8388608
+  cache_max_items: 1024
+  cache_ttl: "15m"
 
 limits:
   max_body_bytes: 1048576
@@ -94,9 +107,19 @@ limits:
 
 search:
   mode: "exact"
+  ann_profile: "balanced"
+  ann_m: 16
+  ann_ef_construction: 64
+  ann_ef_search: 64
+  ann_eval_sample_rate: 0
+
+grpc:
+  enabled: false
+  port: 19191
 ```
 
 Relevant fields:
+- `server.protocol`: `http` or `grpc`; exactly one transport runs per process
 - `server.port`: HTTP service port
 - `server.read_timeout`: HTTP read timeout
 - `server.write_timeout`: HTTP write timeout
@@ -105,12 +128,26 @@ Relevant fields:
 - `database.snapshot_path`: snapshot file path
 - `database.wal_path`: write-ahead log path
 - `database.snapshot_every`: number of operations before snapshot consolidation
+- `database.vector_store`: payload backend, currently `memory` or `disk`
+- `database.vector_path`: directory used by the disk-backed payload store
+- `database.cache_enabled`: enables the in-memory vector cache
+- `database.cache_max_bytes`: primary cache capacity limit
+- `database.cache_max_items`: secondary cache capacity limit
+- `database.cache_ttl`: optional entry TTL
 - `limits.max_body_bytes`: maximum HTTP payload size
 - `limits.max_vector_dim`: maximum accepted vector dimension
 - `limits.max_k`: maximum `k`
 - `search.mode`: `exact` or `ann`
+- `search.ann_profile`: `fast`, `balanced`, or `quality`
+- `search.ann_m`: max neighbor links kept per ANN node
+- `search.ann_ef_construction`: ANN candidate breadth during index construction
+- `search.ann_ef_search`: ANN candidate breadth during query search
+- `search.ann_eval_sample_rate`: percentage of ANN searches also checked against exact search for quality metrics
+- `grpc.port`: gRPC listener port
+- `grpc.enabled`: derived from `server.protocol` and kept for backward compatibility in config files
 
 Environment variables override YAML:
+- `VECTOR_DB_PROTOCOL`
 - `VECTOR_DB_PORT`
 - `VECTOR_DB_READ_TIMEOUT`
 - `VECTOR_DB_WRITE_TIMEOUT`
@@ -119,13 +156,28 @@ Environment variables override YAML:
 - `VECTOR_DB_SNAPSHOT_PATH`
 - `VECTOR_DB_WAL_PATH`
 - `VECTOR_DB_SNAPSHOT_EVERY`
+- `VECTOR_DB_VECTOR_STORE`
+- `VECTOR_DB_VECTOR_PATH`
+- `VECTOR_DB_CACHE_ENABLED`
+- `VECTOR_DB_CACHE_MAX_BYTES`
+- `VECTOR_DB_CACHE_MAX_ITEMS`
+- `VECTOR_DB_CACHE_TTL`
 - `VECTOR_DB_MAX_BODY_BYTES`
 - `VECTOR_DB_MAX_VECTOR_DIM`
 - `VECTOR_DB_MAX_K`
 - `VECTOR_DB_SEARCH_MODE`
+- `VECTOR_DB_ANN_PROFILE`
+- `VECTOR_DB_ANN_M`
+- `VECTOR_DB_ANN_EF_CONSTRUCTION`
+- `VECTOR_DB_ANN_EF_SEARCH`
+- `VECTOR_DB_ANN_EVAL_SAMPLE_RATE`
+- `VECTOR_DB_GRPC_PORT`
+- `VECTOR_DB_GRPC_ENABLED`
+- `VECTOR_DB_CONFIG`
 
 PowerShell example:
 ```powershell
+$env:VECTOR_DB_PROTOCOL='http'
 $env:VECTOR_DB_PORT='19200'
 $env:VECTOR_DB_SEARCH_MODE='ann'
 go run ./cmd/server
@@ -133,20 +185,42 @@ go run ./cmd/server
 
 Bash example:
 ```bash
-VECTOR_DB_PORT=19200 VECTOR_DB_SEARCH_MODE=ann go run ./cmd/server
+VECTOR_DB_PROTOCOL=http VECTOR_DB_PORT=19200 VECTOR_DB_SEARCH_MODE=ann go run ./cmd/server
 ```
+
+Run the binary with an explicit config file:
+```bash
+./lumenvec -config ./configs/config.yaml
+./lumenvec -config ./configs/config.grpc.yaml
+```
+
+Companion config files:
+- `configs/config.yaml`: HTTP mode
+- `configs/config.grpc.yaml`: gRPC mode
 
 ## Persistence
 
-LumenVec persists locally in two files:
+LumenVec supports two payload persistence modes:
+
+- `memory`: vectors live in the in-process store and durability is provided by `snapshot + WAL`
+- `disk`: vectors are stored as payload files under `database.vector_path`, and startup rebuilds the exact index and ANN state from those files
+
+`memory` mode uses:
 - `snapshot.json`: consolidated state
 - `wal.log`: recent operations not yet compacted into a snapshot
 
-On startup it:
-1. loads the snapshot
-2. replays the WAL
-3. writes a consolidated snapshot
-4. truncates the WAL
+In `memory` mode, startup does:
+1. load the snapshot
+2. replay the WAL
+3. write a consolidated snapshot
+4. truncate the WAL
+
+In `disk` mode:
+1. load vector payloads from `database.vector_path`
+2. rebuild the exact index
+3. rebuild the ANN index
+
+In `disk` mode, payload writes do not also write `snapshot + WAL`, so there is no duplicate persistence path for the same vector data.
 
 For Docker usage, mounting `./data` as a volume is recommended.
 
@@ -158,6 +232,22 @@ For Docker usage, mounting `./data` as a volume is recommended.
 - `GET /health` and `GET /metrics` remain public
 - IP rate limiting uses `server.rate_limit_rps`
 - Prometheus metrics are exposed at `GET /metrics`
+- Core metrics include ANN counters, cache hit/miss/eviction/bytes tracking, and disk-store file/record/compaction tracking
+
+Important disk-store metrics:
+- `lumenvec_core_disk_file_bytes`
+- `lumenvec_core_disk_records`
+- `lumenvec_core_disk_stale_records`
+- `lumenvec_core_disk_compactions_total`
+
+ANN runtime config metric:
+- `lumenvec_core_ann_config_info{profile,m,ef_construction,ef_search}=1`
+
+ANN quality metrics:
+- `lumenvec_core_ann_eval_samples_total`
+- `lumenvec_core_ann_eval_top1_matches_total`
+- `lumenvec_core_ann_eval_overlap_results_total`
+- `lumenvec_core_ann_eval_compared_results_total`
 
 ## HTTP API
 
@@ -292,20 +382,50 @@ Responses:
 
 ## Go Client
 
-The example HTTP client is in `pkg/client/client.go`.
+HTTP client:
+- `pkg/client/client.go`
+
+gRPC client:
+- `pkg/client/grpc_client.go`
 
 Current capabilities:
 - `AddVectorWithID`
 - `AddVectors`
+- `GetVector`
 - `SearchVector`
 - `SearchVectors`
 - `DeleteVector`
+- `Health` on the gRPC client
 
 Basic example:
 ```go
 client := client.NewVectorClient("http://localhost:19190")
 err := client.AddVectorWithID("doc-1", []float64{1, 2, 3})
 ```
+
+gRPC example:
+```go
+grpcClient, err := client.NewGRPCVectorClient("localhost:19191")
+if err != nil {
+    panic(err)
+}
+defer grpcClient.Close()
+
+err = grpcClient.AddVectorWithID("doc-1", []float64{1, 2, 3})
+```
+
+## gRPC API
+
+Implemented RPCs:
+- `Health`
+- `AddVector`
+- `AddVectorsBatch`
+- `GetVector`
+- `Search`
+- `SearchBatch`
+- `DeleteVector`
+
+The protobuf definition is in `api/proto/service.proto`.
 
 ## Docker and Compose
 
@@ -324,15 +444,42 @@ Compose:
 docker compose up --build -d
 docker compose logs -f
 docker compose down
+make compose-validate
 ```
+
+Observability endpoints with the bundled compose stack:
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000`
+- Grafana default login: `admin` / `admin`
+
+Validation helpers:
+- Bash: `bash scripts/validate-observability.sh`
+- Bash with startup: `bash scripts/validate-observability.sh --start`
+- PowerShell: `powershell -ExecutionPolicy Bypass -File scripts/validate-observability.ps1`
+- PowerShell with startup: `powershell -ExecutionPolicy Bypass -File scripts/validate-observability.ps1 -Start`
+
+Generate sample traffic for dashboards:
+- Go tool: `go run ./tools/loadgen`
+- Makefile: `make loadgen`
+- Example: `go run ./tools/loadgen --vectors 1000 --searches 500 --batch-size 200 --k 10`
+- gRPC example: `go run ./tools/loadgen --transport grpc --grpc-addr localhost:19191 --vectors 1000 --searches 500`
+
+Release packaging:
+- Bash: `bash scripts/package-release.sh`
+- PowerShell: `powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1`
+- Makefile: `make release-assets`
+- Output: transport-specific archives under `dist/release`
+- GitHub tags matching `v*` trigger the release workflow and upload the packaged assets automatically
 
 ## Release
 
 Recommended minimum release flow:
 1. run `go test ./...`
-2. build the image with `docker build -t lumenvec:latest .`
-3. test locally with `docker compose up --build`
-4. publish the image to your target registry
+2. build release bundles with `make release-assets`
+3. build the image with `docker build -t lumenvec:latest .`
+4. test locally with `docker compose up --build`
+5. push tag `vX.Y.Z` to trigger the GitHub release workflow
+6. publish the image to your target registry
 
 Docker Hub example:
 ```bash
@@ -358,6 +505,26 @@ Core benchmark:
 ```bash
 go test ./internal/core -bench . -benchmem
 ```
+
+Core storage benchmark:
+```bash
+go test ./internal/core -run ^$ -bench "BenchmarkService(GetVectorByStore|SearchByStore)" -benchmem
+```
+
+ANN tuning benchmark:
+```bash
+go test ./internal/index/ann -run ^$ -bench "BenchmarkAnnSearch(Tuning)?$" -benchmem
+```
+
+Transport benchmark:
+```bash
+go test ./internal/api -run ^$ -bench BenchmarkTransport -benchmem
+```
+
+Initial ANN tuning guidance:
+- `m=8`, `ef_construction=32`, `ef_search=32`: lower latency, lower recall headroom
+- `m=16`, `ef_construction=64`, `ef_search=64`: balanced default for general use
+- `m=24`, `ef_construction=96`, `ef_search=96`: higher search cost, better recall headroom for stricter quality targets
 
 Makefile shortcuts:
 ```bash
@@ -397,18 +564,20 @@ lumenvec/
 
 ## Current Project State
 
-The project currently exposes HTTP only. There is a `.proto` file in the repository, but the gRPC server is not implemented yet.
+The project currently exposes HTTP or gRPC over the same Go-native core service, with one transport selected per process.
 
 Current architectural direction:
-- HTTP as the public interface and control plane
-- continued core optimization for throughput
-- gRPC as a later step when a higher-performance data plane is justified
+- keep HTTP as the simple public interface
+- use gRPC in a dedicated process for higher-throughput internal and batch-oriented workloads
+- continue evolving the hot-vector cache and ANN path for lower latency
 
 ## Support Files
 
 - `CONTRIBUTING.md`: contribution flow and pre-PR checks
 - `CHANGELOG.md`: summary of notable changes
 - `SECURITY.md`: lightweight disclosure and hardening guidance
+- `docs/roadmap.md`: execution backlog for cache, ANN refactor, and gRPC delivery
+- `docs/observability.md`: Prometheus queries, dashboard guidance, and ANN alerting notes
 - `Makefile`: shortcuts for build, test, benchmarks, and Docker
 - `VERSION`: current release version
 - `RELEASE.md`: release notes

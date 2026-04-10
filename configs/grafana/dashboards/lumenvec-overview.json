@@ -1,0 +1,187 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "rate(lumenvec_core_ann_searches_total[5m])",
+          "legendFormat": "ANN searches/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(lumenvec_core_ann_fallbacks_total[5m])",
+          "legendFormat": "ANN fallbacks/s",
+          "refId": "B"
+        }
+      ],
+      "title": "ANN Search Traffic",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "rate(lumenvec_core_ann_eval_top1_matches_total[15m]) / clamp_min(rate(lumenvec_core_ann_eval_samples_total[15m]), 0.0001)",
+          "legendFormat": "Top-1 match ratio",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(lumenvec_core_ann_eval_overlap_results_total[15m]) / clamp_min(rate(lumenvec_core_ann_eval_compared_results_total[15m]), 0.0001)",
+          "legendFormat": "Overlap ratio",
+          "refId": "B"
+        }
+      ],
+      "title": "ANN Quality Ratios",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "lumenvec_core_cache_bytes",
+          "legendFormat": "Cache bytes",
+          "refId": "A"
+        },
+        {
+          "expr": "lumenvec_core_disk_file_bytes",
+          "legendFormat": "Disk file bytes",
+          "refId": "B"
+        }
+      ],
+      "title": "Storage Footprint",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "lumenvec_core_disk_stale_records",
+          "legendFormat": "Stale records",
+          "refId": "A"
+        },
+        {
+          "expr": "lumenvec_core_disk_records",
+          "legendFormat": "Live records",
+          "refId": "B"
+        }
+      ],
+      "title": "Disk Record Pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "lumenvec_core_ann_config_info",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{profile}} m={{m}} efc={{ef_construction}} efs={{ef_search}}",
+          "refId": "A"
+        }
+      ],
+      "title": "ANN Effective Config",
+      "type": "table"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "lumenvec"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "",
+  "title": "LumenVec Overview",
+  "uid": "lumenvec-overview",
+  "version": 1,
+  "weekStart": ""
+}

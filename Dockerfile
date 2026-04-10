@@ -1,4 +1,4 @@
-FROM golang:1.23 AS builder
+FROM golang:1.24 AS builder
 
 WORKDIR /src
 
@@ -18,4 +18,3 @@ COPY configs/config.yaml /app/configs/config.yaml
 EXPOSE 19190
 
 ENTRYPOINT ["/app/lumenvec"]
-

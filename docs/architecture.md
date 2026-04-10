@@ -1,44 +1,162 @@
-# Arquitetura do Banco de Dados Vetorial
+# Architecture
 
-## Visão Geral
+## Overview
 
-O banco de dados vetorial é projetado para armazenar e gerenciar vetores de alta dimensão, permitindo operações eficientes de busca e recuperação. A arquitetura é modular, dividida em componentes que interagem entre si para fornecer uma API robusta e um desempenho otimizado.
+LumenVec is organized around a shared Go-native core service with two transport layers:
 
-## Componentes Principais
+- HTTP for simple operational access and broad compatibility
+- gRPC for lower-overhead service-to-service and batch-oriented traffic
 
-### 1. Servidor API
+Both transports call the same `core.Service`, so validation, persistence, cache behavior, and search semantics stay aligned. A single process runs exactly one transport, selected by configuration.
 
-O servidor API é responsável por gerenciar as requisições HTTP e fornecer uma interface para os clientes interagirem com o banco de dados. Ele é implementado no pacote `internal/api` e utiliza o arquivo `server.go` para configurar e iniciar o servidor.
+## Main Components
 
-### 2. Indexação
+### Transport Layer
 
-A indexação é um componente crítico que permite a busca eficiente de vetores. O pacote `internal/index` contém a lógica para gerenciar o índice vetorial. O arquivo `index.go` define a estrutura principal e os métodos para adicionar, buscar e deletar vetores. O algoritmo de busca mais próximo (ANN) é implementado no subpacote `ann`, que contém o arquivo `ann_index.go`.
+The transport layer lives in `internal/api`.
 
-### 3. Armazenamento
+- `server.go` provides the HTTP server, middleware, metrics endpoint, and startup wiring
+- `grpc.go` provides the gRPC server and protobuf-backed method handlers
+- `server.protocol` selects which listener is started for a given process
 
-O armazenamento dos vetores é gerenciado pelo pacote `internal/storage`. O arquivo `store.go` define uma interface para operações de persistência, enquanto `leveldb_store.go` implementa essa interface utilizando LevelDB como backend, garantindo operações de armazenamento e recuperação eficientes.
+### Core Service
 
-### 4. Vetores
+The core logic lives in `internal/core/service.go`.
 
-O pacote `internal/vector` define a estrutura de dados para os vetores e fornece métodos para operações matemáticas, como adição, subtração e normalização. O arquivo `vector.go` contém a definição da estrutura, enquanto `distance.go` implementa funções para calcular distâncias entre vetores, como distância euclidiana e cosseno.
+It is responsible for:
 
-### 5. Utilitários
+- vector validation
+- write orchestration
+- exact and ANN search dispatch
+- recovery orchestration across memory-backed and disk-backed payload modes
+- service-level stats used by Prometheus collectors
 
-O pacote `internal/util` fornece utilitários de logging através do arquivo `logger.go`, permitindo que a aplicação registre mensagens informativas e erros de forma consistente.
+The core no longer depends directly on one concrete in-memory layout. It is built around explicit dependencies for payload storage, indexing, persistence, and ID resolution.
 
-### 6. Cliente
+### Payload Storage
 
-O pacote `pkg/client` implementa a interface do cliente para interagir com o banco de dados vetorial. O arquivo `client.go` contém métodos para conectar ao servidor e realizar operações CRUD nos vetores.
+Vector payload ownership is handled by `VectorStore` implementations in `internal/core`.
 
-## Interações entre Componentes
+Current behavior:
 
-Os componentes interagem da seguinte forma:
+- a memory-backed vector store acts as the primary payload store
+- a file-backed vector store can act as the persistent payload source
+- an optional cache decorator keeps hot vectors in memory with:
+- LRU-style ordering
+- TTL support
+- `max_bytes` as the primary capacity limit
+- `max_items` as a secondary guardrail
 
-- O cliente faz requisições HTTP ao servidor API.
-- O servidor API processa as requisições e utiliza o índice para buscar vetores.
-- O índice interage com o armazenamento para persistir ou recuperar dados.
-- O armazenamento utiliza LevelDB para gerenciar a persistência dos vetores.
+The ANN re-score path now reads vector payloads from `VectorStore`, not from the exact index.
 
-## Conclusão
+### Indexing
 
-A arquitetura do banco de dados vetorial é projetada para ser modular e escalável, permitindo fácil manutenção e extensibilidade. Cada componente é responsável por uma parte específica da funcionalidade, garantindo que o sistema como um todo opere de forma eficiente e eficaz.
+There are two search structures:
+
+- exact index in `internal/index`
+- ANN graph index in `internal/index/ann`
+
+Exact search iterates the exact index.
+
+ANN search:
+
+- uses stable internal IDs
+- gets candidate IDs from the ANN graph
+- fetches only candidate payloads from `VectorStore`
+- computes final distances and orders the results
+
+### Persistence
+
+Persistence is split across two modes:
+
+- memory-backed payloads use `PersistenceBackend` in `internal/core/persistence.go`
+- disk-backed payloads use `VectorStore` itself as the payload source of truth
+
+The default `PersistenceBackend` implementation uses:
+
+- `snapshot.json` for compacted state
+- `wal.log` for recent operations
+
+Startup recovery in `memory` mode:
+
+1. load snapshot
+2. replay WAL
+3. write a fresh snapshot
+4. truncate WAL
+
+Startup recovery in `disk` mode:
+
+1. list payloads from the disk-backed `VectorStore`
+2. rebuild the exact index
+3. rebuild stable ID mappings
+4. rebuild the ANN graph
+
+### Configuration
+
+Configuration is loaded from `configs/config.yaml` and optional environment overrides in `internal/config/config.go`.
+
+Current operational knobs include:
+
+- transport protocol selection
+- HTTP port and timeouts
+- gRPC port
+- payload size, dimension, and `top-k` limits
+- search mode
+- ANN graph tuning parameters
+- cache size and TTL
+- snapshot/WAL paths for `memory` mode
+- payload store mode and payload directory for `disk` mode
+
+## Request Flow
+
+### Write Path
+
+1. transport validates payload format
+2. `core.Service` validates semantic constraints
+3. payload is written to `VectorStore`
+4. exact index is updated
+5. ANN index is updated
+6. in `memory` mode, a WAL entry is appended
+7. in `memory` mode, snapshot compaction runs when the configured threshold is reached
+
+### Exact Search Path
+
+1. transport calls `core.Service`
+2. exact index iterates current vectors
+3. distances are computed directly
+4. top-k results are returned
+
+### ANN Search Path
+
+1. transport calls `core.Service`
+2. ANN index returns candidate internal IDs
+3. IDs are resolved through `IDResolver`
+4. payloads are loaded from `VectorStore`
+5. exact distances are recomputed for the candidate set
+6. top-k results are returned
+7. exact search is used as fallback if ANN yields no usable result
+
+## Observability
+
+Prometheus metrics are exposed at `/metrics`.
+
+Current metrics include:
+
+- HTTP request totals and duration
+- ANN attempts, hits, fallbacks, errors, and candidate counts
+- cache hits, misses, evictions, item count, and approximate bytes
+- disk-store file bytes, live records, stale records, and compaction count
+
+## Current Constraints
+
+- the default payload store is still memory-backed
+- the disk-backed store is a simple append-only binary file with periodic compaction, not yet an optimized large-scale backend
+- gRPC support currently covers unary request/response methods; streaming is not implemented
+
+## Direction
+
+The current architecture is ready for the next stage:
+
+- replace or augment the in-memory payload store with a disk-first backend
+- evolve cache admission and memory accounting further
+- add gRPC performance tuning and optional streaming APIs

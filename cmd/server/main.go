@@ -1,11 +1,14 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"lumenvec/internal/api"
 	"lumenvec/internal/config"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -16,7 +19,7 @@ var (
 )
 
 func main() {
-	mustExecute(executeFunc, "./configs/config.yaml", runServer)
+	mustExecute(executeFunc, resolveConfigPath(), runServer)
 	logInfof("Server stopped")
 }
 
@@ -36,18 +39,32 @@ func buildServer(configPath string) (*api.Server, error) {
 	}
 
 	server := api.NewServerWithOptions(api.ServerOptions{
-		Port:          cfg.Server.Port,
-		ReadTimeout:   config.ParseDuration(cfg.Server.ReadTimeout, 10*time.Second),
-		WriteTimeout:  config.ParseDuration(cfg.Server.WriteTimeout, 10*time.Second),
-		MaxBodyBytes:  cfg.Limits.MaxBodyBytes,
-		MaxVectorDim:  cfg.Limits.MaxVectorDim,
-		MaxK:          cfg.Limits.MaxK,
-		SnapshotPath:  cfg.Database.SnapshotPath,
-		WALPath:       cfg.Database.WALPath,
-		SnapshotEvery: cfg.Database.SnapshotEvery,
-		APIKey:        cfg.Server.APIKey,
-		RateLimitRPS:  cfg.Server.RateLimitRPS,
-		SearchMode:    cfg.Search.Mode,
+		Protocol:          cfg.Server.Protocol,
+		Port:              cfg.Server.Port,
+		ReadTimeout:       config.ParseDuration(cfg.Server.ReadTimeout, 10*time.Second),
+		WriteTimeout:      config.ParseDuration(cfg.Server.WriteTimeout, 10*time.Second),
+		MaxBodyBytes:      cfg.Limits.MaxBodyBytes,
+		MaxVectorDim:      cfg.Limits.MaxVectorDim,
+		MaxK:              cfg.Limits.MaxK,
+		SnapshotPath:      cfg.Database.SnapshotPath,
+		WALPath:           cfg.Database.WALPath,
+		SnapshotEvery:     cfg.Database.SnapshotEvery,
+		VectorStore:       cfg.Database.VectorStore,
+		VectorPath:        cfg.Database.VectorPath,
+		APIKey:            cfg.Server.APIKey,
+		RateLimitRPS:      cfg.Server.RateLimitRPS,
+		SearchMode:        cfg.Search.Mode,
+		ANNProfile:        cfg.Search.ANNProfile,
+		ANNM:              cfg.Search.ANNM,
+		ANNEfConstruct:    cfg.Search.ANNEfConstruct,
+		ANNEfSearch:       cfg.Search.ANNEfSearch,
+		ANNEvalSampleRate: cfg.Search.ANNEvalSampleRate,
+		CacheEnabled:      cfg.Database.CacheEnabled,
+		CacheMaxBytes:     cfg.Database.CacheMaxBytes,
+		CacheMaxItems:     cfg.Database.CacheMaxItems,
+		CacheTTL:          config.ParseDuration(cfg.Database.CacheTTL, 15*time.Minute),
+		GRPCEnabled:       cfg.GRPC.Enabled,
+		GRPCPort:          cfg.GRPC.Port,
 	})
 	return server, nil
 }
@@ -58,6 +75,19 @@ type serverRunner interface {
 
 func runServer(server serverRunner) {
 	server.Start()
+}
+
+func resolveConfigPath() string {
+	defaultPath := "./configs/config.yaml"
+	if envPath := strings.TrimSpace(os.Getenv("VECTOR_DB_CONFIG")); envPath != "" {
+		defaultPath = envPath
+	}
+
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", defaultPath, "path to the configuration file")
+	_ = fs.Parse(os.Args[1:])
+	return *configPath
 }
 
 func mustExecute(executor func(string, func(serverRunner)) error, configPath string, runner func(serverRunner)) {

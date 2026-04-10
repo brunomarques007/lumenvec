@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-assets:
+    name: Build Release Assets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build transport bundles
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}" GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" DIST_DIR="dist/release" bash scripts/package-release.sh
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/release/*
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download bundled assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Extract release notes for current tag
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          awk -v tag="$tag" '
+            $0 == "## " tag { printing=1; next }
+            printing && /^## / { exit }
+            printing { print }
+          ' RELEASE.md > dist/release/release-notes.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: dist/release/release-notes.md
+          files: dist/release/*

@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Server struct {
+		Protocol     string `yaml:"protocol"`
 		Port         string `yaml:"port"`
 		ReadTimeout  string `yaml:"read_timeout"`
 		WriteTimeout string `yaml:"write_timeout"`
@@ -21,6 +22,12 @@ type Config struct {
 		SnapshotPath  string `yaml:"snapshot_path"`
 		WALPath       string `yaml:"wal_path"`
 		SnapshotEvery int    `yaml:"snapshot_every"`
+		VectorStore   string `yaml:"vector_store"`
+		VectorPath    string `yaml:"vector_path"`
+		CacheEnabled  bool   `yaml:"cache_enabled"`
+		CacheMaxBytes int64  `yaml:"cache_max_bytes"`
+		CacheMaxItems int    `yaml:"cache_max_items"`
+		CacheTTL      string `yaml:"cache_ttl"`
 	} `yaml:"database"`
 	Limits struct {
 		MaxBodyBytes int64 `yaml:"max_body_bytes"`
@@ -28,8 +35,17 @@ type Config struct {
 		MaxK         int   `yaml:"max_k"`
 	} `yaml:"limits"`
 	Search struct {
-		Mode string `yaml:"mode"`
+		Mode              string `yaml:"mode"`
+		ANNProfile        string `yaml:"ann_profile"`
+		ANNM              int    `yaml:"ann_m"`
+		ANNEfConstruct    int    `yaml:"ann_ef_construction"`
+		ANNEfSearch       int    `yaml:"ann_ef_search"`
+		ANNEvalSampleRate int    `yaml:"ann_eval_sample_rate"`
 	} `yaml:"search"`
+	GRPC struct {
+		Enabled bool   `yaml:"enabled"`
+		Port    string `yaml:"port"`
+	} `yaml:"grpc"`
 }
 
 func Load(path string) (Config, error) {
@@ -60,6 +76,7 @@ func ParseDuration(raw string, fallback time.Duration) time.Duration {
 
 func defaultConfig() Config {
 	var cfg Config
+	cfg.Server.Protocol = "http"
 	cfg.Server.Port = "19190"
 	cfg.Server.ReadTimeout = "10s"
 	cfg.Server.WriteTimeout = "10s"
@@ -68,14 +85,27 @@ func defaultConfig() Config {
 	cfg.Database.SnapshotPath = "./data/snapshot.json"
 	cfg.Database.WALPath = "./data/wal.log"
 	cfg.Database.SnapshotEvery = 25
+	cfg.Database.VectorStore = "memory"
+	cfg.Database.VectorPath = "./data/vectors"
+	cfg.Database.CacheEnabled = false
+	cfg.Database.CacheMaxBytes = 8 << 20
+	cfg.Database.CacheMaxItems = 1024
+	cfg.Database.CacheTTL = "15m"
 	cfg.Limits.MaxBodyBytes = 1 << 20
 	cfg.Limits.MaxVectorDim = 4096
 	cfg.Limits.MaxK = 100
 	cfg.Search.Mode = "exact"
+	cfg.Search.ANNProfile = "balanced"
+	cfg.Search.ANNEvalSampleRate = 0
+	cfg.GRPC.Enabled = false
+	cfg.GRPC.Port = "19191"
 	return cfg
 }
 
 func overrideFromEnv(cfg *Config) {
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_PROTOCOL")); v != "" {
+		cfg.Server.Protocol = v
+	}
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_PORT")); v != "" {
 		cfg.Server.Port = v
 	}
@@ -104,6 +134,30 @@ func overrideFromEnv(cfg *Config) {
 			cfg.Database.SnapshotEvery = n
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_VECTOR_STORE")); v != "" {
+		cfg.Database.VectorStore = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_VECTOR_PATH")); v != "" {
+		cfg.Database.VectorPath = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_CACHE_ENABLED")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Database.CacheEnabled = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_CACHE_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.Database.CacheMaxBytes = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_CACHE_MAX_ITEMS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Database.CacheMaxItems = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_CACHE_TTL")); v != "" {
+		cfg.Database.CacheTTL = v
+	}
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_MAX_BODY_BYTES")); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			cfg.Limits.MaxBodyBytes = n
@@ -121,5 +175,90 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_SEARCH_MODE")); v != "" {
 		cfg.Search.Mode = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_ANN_PROFILE")); v != "" {
+		cfg.Search.ANNProfile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_ANN_M")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Search.ANNM = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_ANN_EF_CONSTRUCTION")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Search.ANNEfConstruct = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_ANN_EF_SEARCH")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Search.ANNEfSearch = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_ANN_EVAL_SAMPLE_RATE")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.Search.ANNEvalSampleRate = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_GRPC_ENABLED")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.GRPC.Enabled = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_GRPC_PORT")); v != "" {
+		cfg.GRPC.Port = v
+	}
+	applyTransportDefaults(cfg)
+	applyANNProfileDefaults(cfg)
+}
+
+func applyTransportDefaults(cfg *Config) {
+	cfg.Server.Protocol = normalizeProtocol(cfg.Server.Protocol)
+	cfg.GRPC.Enabled = cfg.Server.Protocol == "grpc"
+}
+
+func normalizeProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "grpc":
+		return "grpc"
+	default:
+		return "http"
+	}
+}
+
+func applyANNProfileDefaults(cfg *Config) {
+	profile := normalizeANNProfile(cfg.Search.ANNProfile)
+	cfg.Search.ANNProfile = profile
+
+	m, efConstruct, efSearch := annProfileDefaults(profile)
+	if cfg.Search.ANNM <= 0 {
+		cfg.Search.ANNM = m
+	}
+	if cfg.Search.ANNEfConstruct <= 0 {
+		cfg.Search.ANNEfConstruct = efConstruct
+	}
+	if cfg.Search.ANNEfSearch <= 0 {
+		cfg.Search.ANNEfSearch = efSearch
+	}
+}
+
+func normalizeANNProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "fast":
+		return "fast"
+	case "quality":
+		return "quality"
+	default:
+		return "balanced"
+	}
+}
+
+func annProfileDefaults(profile string) (m, efConstruct, efSearch int) {
+	switch normalizeANNProfile(profile) {
+	case "fast":
+		return 8, 32, 32
+	case "quality":
+		return 24, 96, 96
+	default:
+		return 16, 64, 64
 	}
 }

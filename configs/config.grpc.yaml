@@ -1,5 +1,5 @@
 server:
-  protocol: "http"
+  protocol: "grpc"
   port: 19190
   read_timeout: 10s
   write_timeout: 10s
@@ -31,9 +31,5 @@ search:
   ann_eval_sample_rate: 0
 
 grpc:
-  enabled: false
+  enabled: true
   port: 19191
-
-logging:
-  level: "info"
-  output: "stdout"

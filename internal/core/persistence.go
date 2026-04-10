@@ -1,0 +1,122 @@
+package core
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"lumenvec/internal/index"
+)
+
+type PersistenceBackend interface {
+	SaveSnapshot(vectors []index.Vector) error
+	LoadSnapshot() (map[string][]float64, error)
+	AppendWAL(op walOp) error
+	ReplayWAL(func(walOp) error) error
+	TruncateWAL() error
+}
+
+type snapshotWALBackend struct {
+	snapshotPath string
+	walPath      string
+}
+
+func newSnapshotWALBackend(snapshotPath, walPath string) *snapshotWALBackend {
+	return &snapshotWALBackend{
+		snapshotPath: snapshotPath,
+		walPath:      walPath,
+	}
+}
+
+func (b *snapshotWALBackend) SaveSnapshot(vectors []index.Vector) error {
+	payload := make(map[string][]float64, len(vectors))
+	for _, vec := range vectors {
+		payload[vec.ID] = append([]float64(nil), vec.Values...)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(b.snapshotPath), 0o755); err != nil {
+		return err
+	}
+	tmp := b.snapshotPath + ".tmp"
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b.snapshotPath)
+}
+
+func (b *snapshotWALBackend) LoadSnapshot() (map[string][]float64, error) {
+	data, err := os.ReadFile(b.snapshotPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var payload map[string][]float64
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func (b *snapshotWALBackend) AppendWAL(op walOp) error {
+	if err := os.MkdirAll(filepath.Dir(b.walPath), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(b.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	data, err := json.Marshal(op)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+func (b *snapshotWALBackend) ReplayWAL(apply func(walOp) error) error {
+	f, err := os.Open(b.walPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var op walOp
+		if err := json.Unmarshal([]byte(line), &op); err != nil {
+			return err
+		}
+		if err := apply(op); err != nil && !errors.Is(err, errSkipWALOp) {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func (b *snapshotWALBackend) TruncateWAL() error {
+	if err := os.MkdirAll(filepath.Dir(b.walPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(b.walPath, []byte{}, 0o644)
+}

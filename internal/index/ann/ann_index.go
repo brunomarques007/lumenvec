@@ -1,7 +1,6 @@
 package ann
 
 import (
-	"container/heap"
 	"errors"
 	"math"
 	"math/rand"
@@ -147,21 +146,19 @@ func (a *AnnIndex) searchCandidatesLocked(query []float64, ef int) []distancePai
 	}
 
 	visited := make(map[int]struct{}, ef*2)
-	minQ := &minDistHeap{}
-	heap.Init(minQ)
-	maxQ := &maxDistHeap{}
-	heap.Init(maxQ)
+	minQ := make(minDistHeap, 0, ef)
+	maxQ := make(maxDistHeap, 0, ef)
 
 	start := a.entrypoint
 	startNode := a.nodes[start]
 	startDist := euclideanDistance(query, startNode.vector)
 
-	heap.Push(minQ, distancePair{id: start, distance: startDist})
-	heap.Push(maxQ, distancePair{id: start, distance: startDist})
+	minQ.Push(distancePair{id: start, distance: startDist})
+	maxQ.Push(distancePair{id: start, distance: startDist})
 	visited[start] = struct{}{}
 
 	for minQ.Len() > 0 {
-		current := heap.Pop(minQ).(distancePair)
+		current := minQ.Pop()
 
 		worst := maxQ.Peek()
 		if maxQ.Len() >= ef && current.distance > worst.distance {
@@ -179,10 +176,10 @@ func (a *AnnIndex) searchCandidatesLocked(query []float64, ef int) []distancePai
 			dist := euclideanDistance(query, neighbor.vector)
 			if maxQ.Len() < ef || dist < maxQ.Peek().distance {
 				dp := distancePair{id: nid, distance: dist}
-				heap.Push(minQ, dp)
-				heap.Push(maxQ, dp)
+				minQ.Push(dp)
+				maxQ.Push(dp)
 				if maxQ.Len() > ef {
-					heap.Pop(maxQ)
+					maxQ.Pop()
 				}
 			}
 		}
@@ -190,7 +187,7 @@ func (a *AnnIndex) searchCandidatesLocked(query []float64, ef int) []distancePai
 
 	out := make([]distancePair, maxQ.Len())
 	for i := len(out) - 1; i >= 0; i-- {
-		out[i] = heap.Pop(maxQ).(distancePair)
+		out[i] = maxQ.Pop()
 	}
 	return out
 }
@@ -260,31 +257,100 @@ func euclideanDistance(a, b []float64) float64 {
 
 type minDistHeap []distancePair
 
-func (h minDistHeap) Len() int            { return len(h) }
-func (h minDistHeap) Less(i, j int) bool  { return h[i].distance < h[j].distance }
-func (h minDistHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *minDistHeap) Push(x interface{}) { *h = append(*h, x.(distancePair)) }
-func (h *minDistHeap) Pop() interface{} {
+func (h minDistHeap) Len() int { return len(h) }
+func (h minDistHeap) Peek() distancePair {
+	return h[0]
+}
+func (h *minDistHeap) Push(x distancePair) {
+	*h = append(*h, x)
+	upMin(*h, len(*h)-1)
+}
+func (h *minDistHeap) Pop() distancePair {
 	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
+	n := len(old) - 1
+	old[0], old[n] = old[n], old[0]
+	downMin(old[:n], 0)
+	item := old[n]
+	*h = old[:n]
 	return item
 }
 
 type maxDistHeap []distancePair
 
-func (h maxDistHeap) Len() int           { return len(h) }
-func (h maxDistHeap) Less(i, j int) bool { return h[i].distance > h[j].distance }
-func (h maxDistHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *maxDistHeap) Push(x interface{}) {
-	*h = append(*h, x.(distancePair))
+func (h maxDistHeap) Len() int { return len(h) }
+func (h maxDistHeap) Peek() distancePair {
+	return h[0]
 }
-func (h *maxDistHeap) Pop() interface{} {
+func (h *maxDistHeap) Push(x distancePair) {
+	*h = append(*h, x)
+	upMax(*h, len(*h)-1)
+}
+func (h *maxDistHeap) Pop() distancePair {
 	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
+	n := len(old) - 1
+	old[0], old[n] = old[n], old[0]
+	downMax(old[:n], 0)
+	item := old[n]
+	*h = old[:n]
 	return item
 }
-func (h maxDistHeap) Peek() distancePair { return h[0] }
+
+func upMin(h minDistHeap, j int) {
+	for {
+		i := (j - 1) / 2
+		if i == j || h[j].distance >= h[i].distance {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		j = i
+	}
+}
+
+func downMin(h minDistHeap, i int) {
+	for {
+		left := 2*i + 1
+		if left >= len(h) {
+			break
+		}
+		child := left
+		right := left + 1
+		if right < len(h) && h[right].distance < h[left].distance {
+			child = right
+		}
+		if h[i].distance <= h[child].distance {
+			break
+		}
+		h[i], h[child] = h[child], h[i]
+		i = child
+	}
+}
+
+func upMax(h maxDistHeap, j int) {
+	for {
+		i := (j - 1) / 2
+		if i == j || h[j].distance <= h[i].distance {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		j = i
+	}
+}
+
+func downMax(h maxDistHeap, i int) {
+	for {
+		left := 2*i + 1
+		if left >= len(h) {
+			break
+		}
+		child := left
+		right := left + 1
+		if right < len(h) && h[right].distance > h[left].distance {
+			child = right
+		}
+		if h[i].distance >= h[child].distance {
+			break
+		}
+		h[i], h[child] = h[child], h[i]
+		i = child
+	}
+}

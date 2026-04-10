@@ -1,6 +1,6 @@
 APP_NAME=lumenvec
 
-.PHONY: test vet build run bench tidy coverage docker-build compose-up compose-down
+.PHONY: test vet build run bench tidy coverage docker-build compose-up compose-down compose-validate loadgen release-assets
 
 test:
 	go test ./...
@@ -31,3 +31,12 @@ compose-up:
 
 compose-down:
 	docker compose down
+
+compose-validate:
+	bash scripts/validate-observability.sh
+
+loadgen:
+	go run ./tools/loadgen
+
+release-assets:
+	bash scripts/package-release.sh
