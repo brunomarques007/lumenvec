@@ -469,7 +469,7 @@ Release packaging:
 - PowerShell: `powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1`
 - Makefile: `make release-assets`
 - Output: transport-specific archives under `dist/release`, one `http` and one `grpc` package per supported OS
-- merges into `main` trigger the release workflow, which reads `VERSION`, creates the tag, and uploads the packaged assets automatically
+- merges into `main` trigger the release workflow, which computes the next patch version from the latest tag, creates the new tag, and uploads the packaged assets automatically
 
 ## Release
 
@@ -477,8 +477,8 @@ Recommended minimum release flow:
 1. run `go test ./...`
 2. open or update a `feature/*` branch and let CI promote it to a draft PR against `dev`
 3. merge validated changes into `dev`, then review the automated draft PR from `dev` to `main`
-4. update `VERSION` and the matching `RELEASE.md` section before merging to `main`
-5. merge into `main` to trigger the GitHub release workflow
+4. merge into `main` to trigger the GitHub release workflow
+5. let the workflow compute the next patch version and generate release notes from the commits since the previous tag
 6. publish the image to your target registry if you also distribute containers
 
 Docker Hub example:
@@ -490,7 +490,7 @@ docker push brunomarques007/lumenvec:latest
 Publication checklist:
 1. review the final public Docker image name
 2. confirm `LICENSE` matches the intended project license
-3. update `VERSION` and add the matching `RELEASE.md` entry before merging to `main`
+3. confirm the commit history between releases is ready to be turned into automated release notes
 
 ## Delivery Pipeline
 
@@ -500,11 +500,12 @@ Branch roles:
 - `main`: protected release branch; merges from `dev` publish the GitHub release
 
 Workflow behavior:
-- pushes to `feature/*`, `bugfix/*`, `hotfix/*`, `dev`, and `main` run `.github/workflows/ci.yml`
+- pushes to `feature/*`, `bugfix/*`, and `hotfix/*` run `.github/workflows/ci.yml`
+- pull requests targeting `dev` and `main` also run `.github/workflows/ci.yml`
 - successful CI runs on `feature/*` open or update a draft PR to `dev`
-- pushes to `dev` run `.github/workflows/release.yml`, which validates `VERSION`, checks the matching section in `RELEASE.md`, and builds the release bundles
+- pushes to `dev` run `.github/workflows/release.yml`, which computes the next patch version from the latest tag, generates release notes from commit history, and builds the release bundles
 - successful runs of `.github/workflows/release.yml` on `dev` open or update a draft PR from `dev` to `main`
-- pushes to `main` run `.github/workflows/publish-release.yml`, which creates the git tag and publishes the GitHub release with the prepared bundles rebuilt from `main`
+- pushes to `main` run `.github/workflows/publish-release.yml`, which computes the next patch version, creates the git tag, and publishes the GitHub release with bundles rebuilt from `main`
 - release asset names follow `lumenvec-vX.Y.Z-<os>-<arch>-<transport>.<ext>`
 
 Recommended repository settings:
@@ -570,8 +571,6 @@ lumenvec/
   CHANGELOG.md
   SECURITY.md
   LICENSE
-  VERSION
-  RELEASE.md
   cmd/server/main.go
   configs/config.yaml
   internal/api/server.go
@@ -600,5 +599,3 @@ Current architectural direction:
 - `docs/roadmap.md`: execution backlog for cache, ANN refactor, and gRPC delivery
 - `docs/observability.md`: Prometheus queries, dashboard guidance, and ANN alerting notes
 - `Makefile`: shortcuts for build, test, benchmarks, and Docker
-- `VERSION`: current release version
-- `RELEASE.md`: release notes

@@ -3,16 +3,12 @@ name: CI
 on:
   push:
     branches:
-      - "main"
-      - "master"
-      - "dev"
       - "feature/**"
       - "bugfix/**"
       - "hotfix/**"
   pull_request:
     branches:
       - "main"
-      - "master"
       - "dev"
 
 permissions:

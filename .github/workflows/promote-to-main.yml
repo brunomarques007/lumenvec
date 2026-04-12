@@ -59,6 +59,18 @@ jobs:
               return;
             }
 
+            const comparison = await github.rest.repos.compareCommits({
+              owner,
+              repo,
+              base,
+              head
+            });
+
+            if (comparison.data.total_commits === 0) {
+              core.info(`No commits between ${base} and ${head}; skipping PR creation.`);
+              return;
+            }
+
             await github.rest.pulls.create({
               owner,
               repo,
