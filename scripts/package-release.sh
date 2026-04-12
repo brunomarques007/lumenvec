@@ -62,7 +62,7 @@ EOF
       exit 1
     fi
   else
-    tar -C "$DIST_DIR" -czf "${bundle_name}.tar.gz" "$bundle_name"
+    tar -C "$DIST_DIR" -czf "$DIST_DIR/${bundle_name}.tar.gz" "$bundle_name"
   fi
 }
 
