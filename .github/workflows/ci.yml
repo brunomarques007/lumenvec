@@ -53,3 +53,35 @@ jobs:
         with:
           version: v2.11.4
           args: --timeout=5m
+
+  container-security:
+    name: Container Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: lumenvec:ci
+
+      - name: Run Trivy image scan
+        run: >
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.68.2
+          image
+          --format table
+          --exit-code 1
+          --ignore-unfixed
+          --severity CRITICAL,HIGH
+          lumenvec:ci

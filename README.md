@@ -49,13 +49,13 @@ bash scripts/run.sh
 ### Run with Docker
 ```bash
 docker build -t lumenvec:latest .
-docker run --rm -p 19190:19190 -v "$(pwd)/data:/app/data" lumenvec:latest
+docker run --rm -p 19190:19190 -p 19191:19191 -v "$(pwd)/data:/data" lumenvec:latest
 ```
 
 PowerShell:
 ```powershell
 docker build -t lumenvec:latest .
-docker run --rm -p 19190:19190 -v ${PWD}/data:/app/data lumenvec:latest
+docker run --rm -p 19190:19190 -p 19191:19191 -v ${PWD}/data:/data lumenvec:latest
 ```
 
 ### Run with Docker Compose
@@ -65,10 +65,12 @@ docker compose up --build
 
 The `docker-compose.yml` example:
 - publishes port `19190`
+- exposes port `19191` for gRPC when needed
 - publishes port `9090` for Prometheus
 - publishes port `3000` for Grafana
 - persists data in `./data`
-- injects baseline environment variables for HTTP mode
+- injects baseline environment variables for HTTP mode and security settings
+- uses a read-only root filesystem, drops Linux capabilities, and enables `no-new-privileges`
 - provisions Prometheus scraping and a Grafana dashboard
 
 To stop it:
@@ -510,13 +512,54 @@ The protobuf definition is in `api/proto/service.proto`.
 ## Docker and Compose
 
 Files included for distribution:
-- `Dockerfile`: multi-stage build and minimal runtime image
+- `Dockerfile`: multi-stage build and distroless non-root runtime image
 - `.dockerignore`: smaller build context
-- `docker-compose.yml`: simple local orchestration
+- `docker-compose.yml`: local orchestration with baseline container hardening
 
 Manual image build:
 ```bash
 docker build -t lumenvec:latest .
+```
+
+Container runtime defaults:
+- runs as `nonroot`
+- persists only under `/data`
+- exposes `19190` for HTTP and `19191` for gRPC
+- configures runtime behavior primarily through environment variables
+- ships both `config.yaml` and `config.grpc.yaml` for explicit `VECTOR_DB_CONFIG` selection
+
+Useful container env vars:
+- `VECTOR_DB_PROTOCOL=http|grpc`
+- `VECTOR_DB_PORT`
+- `VECTOR_DB_GRPC_PORT`
+- `VECTOR_DB_SECURITY_PROFILE=development|production`
+- `VECTOR_DB_SECURITY_AUTH_ENABLED=true|false`
+- `VECTOR_DB_SECURITY_API_KEY`
+- `VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED=true|false`
+- `VECTOR_DB_TLS_ENABLED=true|false`
+- `VECTOR_DB_TLS_CERT_FILE`
+- `VECTOR_DB_TLS_KEY_FILE`
+- `VECTOR_DB_TRUST_FORWARDED_FOR=true|false`
+- `VECTOR_DB_TRUSTED_PROXIES=10.0.0.0/24,10.0.1.10`
+- `VECTOR_DB_STRICT_FILE_PERMISSIONS=true|false`
+- `VECTOR_DB_STORAGE_DIR_MODE`
+- `VECTOR_DB_STORAGE_FILE_MODE`
+
+Production-oriented container example:
+```bash
+docker run --rm \
+  -p 19190:19190 \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/certs:/certs:ro" \
+  -e VECTOR_DB_SECURITY_PROFILE=production \
+  -e VECTOR_DB_SECURITY_AUTH_ENABLED=true \
+  -e VECTOR_DB_SECURITY_API_KEY=replace-me \
+  -e VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED=true \
+  -e VECTOR_DB_TLS_ENABLED=true \
+  -e VECTOR_DB_TLS_CERT_FILE=/certs/server.crt \
+  -e VECTOR_DB_TLS_KEY_FILE=/certs/server.key \
+  -e VECTOR_DB_STRICT_FILE_PERMISSIONS=true \
+  lumenvec:latest
 ```
 
 Compose:
@@ -543,6 +586,7 @@ Generate sample traffic for dashboards:
 - Makefile: `make loadgen`
 - Example: `go run ./tools/loadgen --vectors 1000 --searches 500 --batch-size 200 --k 10`
 - gRPC example: `go run ./tools/loadgen --transport grpc --grpc-addr localhost:19191 --vectors 1000 --searches 500`
+- CI also builds the container image and runs a Trivy scan against it for high and critical vulnerabilities
 
 Release packaging:
 - Bash: `bash scripts/package-release.sh`

@@ -6,17 +6,36 @@ services:
     container_name: lumenvec
     ports:
       - "19190:19190"
+      - "19191:19191"
     environment:
       VECTOR_DB_PROTOCOL: "http"
       VECTOR_DB_PORT: "19190"
-      VECTOR_DB_SNAPSHOT_PATH: "/app/data/snapshot.json"
-      VECTOR_DB_WAL_PATH: "/app/data/wal.log"
+      VECTOR_DB_GRPC_PORT: "19191"
+      VECTOR_DB_SNAPSHOT_PATH: "/data/snapshot.json"
+      VECTOR_DB_WAL_PATH: "/data/wal.log"
+      VECTOR_DB_VECTOR_PATH: "/data/vectors"
       VECTOR_DB_SEARCH_MODE: "ann"
       VECTOR_DB_ANN_PROFILE: "balanced"
       VECTOR_DB_ANN_EVAL_SAMPLE_RATE: "10"
-      VECTOR_DB_API_KEY: ""
+      VECTOR_DB_SECURITY_PROFILE: "development"
+      VECTOR_DB_SECURITY_AUTH_ENABLED: "false"
+      VECTOR_DB_SECURITY_API_KEY: ""
+      VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED: "false"
+      VECTOR_DB_TLS_ENABLED: "false"
+      VECTOR_DB_TRUST_FORWARDED_FOR: "false"
+      VECTOR_DB_TRUSTED_PROXIES: ""
+      VECTOR_DB_STRICT_FILE_PERMISSIONS: "false"
+      VECTOR_DB_STORAGE_DIR_MODE: "0755"
+      VECTOR_DB_STORAGE_FILE_MODE: "0644"
     volumes:
-      - ./data:/app/data
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   prometheus:
@@ -31,6 +50,11 @@ services:
       - ./configs/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
     depends_on:
       - lumenvec
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   grafana:
@@ -48,4 +72,6 @@ services:
       - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
