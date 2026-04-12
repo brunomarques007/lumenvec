@@ -1,11 +1,11 @@
-name: Release
+name: Publish Release
 
 on:
   push:
-    branches: ["dev"]
+    branches: ["main"]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   prepare-release:
@@ -77,8 +77,8 @@ jobs:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/release/*
 
-  validate-release:
-    name: Validate Release Notes
+  publish-release:
+    name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: [prepare-release, build-assets]
 
@@ -110,8 +110,20 @@ jobs:
             exit 1
           fi
 
-      - name: Upload merged release assets
-        uses: actions/upload-artifact@v4
+      - name: Create git tag
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "LumenVec $VERSION"
+          git push origin "$VERSION"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          name: release-bundles-${{ needs.prepare-release.outputs.version }}
-          path: dist/release/*
+          tag_name: ${{ needs.prepare-release.outputs.version }}
+          name: ${{ needs.prepare-release.outputs.version }}
+          body_path: dist/release/release-notes.md
+          files: dist/release/*

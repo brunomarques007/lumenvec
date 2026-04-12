@@ -496,14 +496,15 @@ Publication checklist:
 
 Branch roles:
 - `feature/*`: implementation branches; every push runs CI
-- `dev`: integration branch promoted automatically from successful feature branches
-- `main`: release branch; merges from `dev` publish the GitHub release
+- `dev`: integration branch promoted automatically from successful feature branches; merges into `dev` run the release-preparation workflow
+- `main`: protected release branch; merges from `dev` publish the GitHub release
 
 Workflow behavior:
 - pushes to `feature/*`, `bugfix/*`, `hotfix/*`, `dev`, and `main` run `.github/workflows/ci.yml`
 - successful CI runs on `feature/*` open or update a draft PR to `dev`
-- pushes to `dev` open or update a draft PR from `dev` to `main`
-- pushes to `main` run `.github/workflows/release.yml`, which reads `VERSION`, validates a matching section in `RELEASE.md`, creates the git tag, builds release assets, and publishes the GitHub release
+- pushes to `dev` run `.github/workflows/release.yml`, which validates `VERSION`, checks the matching section in `RELEASE.md`, and builds the release bundles
+- successful runs of `.github/workflows/release.yml` on `dev` open or update a draft PR from `dev` to `main`
+- pushes to `main` run `.github/workflows/publish-release.yml`, which creates the git tag and publishes the GitHub release with the prepared bundles rebuilt from `main`
 - release asset names follow `lumenvec-vX.Y.Z-<os>-<arch>-<transport>.<ext>`
 
 Recommended repository settings:

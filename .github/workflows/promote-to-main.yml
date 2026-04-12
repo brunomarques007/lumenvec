@@ -1,8 +1,9 @@
 name: Promote Dev To Main
 
 on:
-  push:
-    branches: ["dev"]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -11,6 +12,10 @@ permissions:
 jobs:
   open-main-pr:
     name: Open PR To Main
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'dev'
     runs-on: ubuntu-latest
 
     steps:
@@ -30,7 +35,7 @@ jobs:
               `Source branch: \`${head}\``,
               `Target branch: \`${base}\``,
               "",
-              "This draft PR was opened automatically after new changes landed on `dev`."
+              "This draft PR was opened automatically after the release workflow completed successfully on `dev`."
             ].join("\n");
 
             const { data: existing } = await github.rest.pulls.list({
