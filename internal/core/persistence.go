@@ -75,7 +75,7 @@ func (b *snapshotWALBackend) AppendWAL(op walOp) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := json.Marshal(op)
 	if err != nil {
@@ -95,7 +95,7 @@ func (b *snapshotWALBackend) ReplayWAL(apply func(walOp) error) error {
 		}
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

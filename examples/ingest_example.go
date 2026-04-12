@@ -32,9 +32,13 @@ func run(baseURL string, out io.Writer) error {
 		return fmt.Errorf("failed to search vectors: %w", err)
 	}
 
-	fmt.Fprintln(out, "Top 2 nearest vectors:")
+	if _, err := fmt.Fprintln(out, "Top 2 nearest vectors:"); err != nil {
+		return err
+	}
 	for _, r := range results {
-		fmt.Fprintf(out, "- %s (distance=%.4f)\n", r.ID, r.Distance)
+		if _, err := fmt.Fprintf(out, "- %s (distance=%.4f)\n", r.ID, r.Distance); err != nil {
+			return err
+		}
 	}
 	return nil
 }

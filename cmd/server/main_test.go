@@ -95,6 +95,16 @@ grpc:
 	}
 }
 
+func TestExecuteBuildServerError(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("server: ["), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(cfgPath, func(serverRunner) { t.Fatal("runner should not be called") }); err == nil {
+		t.Fatal("expected execute error")
+	}
+}
+
 func TestExecuteMissingConfigUsesDefaults(t *testing.T) {
 	called := false
 	if err := execute(filepath.Join(t.TempDir(), "missing.yaml"), func(serverRunner) { called = true }); err != nil {
@@ -115,6 +125,9 @@ func TestRunServer(t *testing.T) {
 
 func TestServerAddr(t *testing.T) {
 	var cfg config.Config
+	if got := serverAddr(cfg); got != ":19190" {
+		t.Fatalf("serverAddr() default = %q", got)
+	}
 	cfg.Server.Port = "19190"
 	if got := serverAddr(cfg); got != ":19190" {
 		t.Fatalf("serverAddr() = %q", got)
@@ -167,10 +180,30 @@ func TestMustExecuteAndMain(t *testing.T) {
 
 func TestResolveConfigPath(t *testing.T) {
 	oldArgs := os.Args
-	t.Cleanup(func() { os.Args = oldArgs })
+	oldEnv := os.Getenv("VECTOR_DB_CONFIG")
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		if oldEnv == "" {
+			_ = os.Unsetenv("VECTOR_DB_CONFIG")
+		} else {
+			_ = os.Setenv("VECTOR_DB_CONFIG", oldEnv)
+		}
+	})
 
 	os.Args = []string{"lumenvec", "-config", "custom.yaml"}
 	if got := resolveConfigPath(); got != "custom.yaml" {
 		t.Fatalf("resolveConfigPath() = %q", got)
+	}
+
+	_ = os.Setenv("VECTOR_DB_CONFIG", "env.yaml")
+	os.Args = []string{"lumenvec"}
+	if got := resolveConfigPath(); got != "env.yaml" {
+		t.Fatalf("resolveConfigPath() env = %q", got)
+	}
+
+	_ = os.Unsetenv("VECTOR_DB_CONFIG")
+	os.Args = []string{"lumenvec", "-badflag"}
+	if got := resolveConfigPath(); got != "./configs/config.yaml" {
+		t.Fatalf("resolveConfigPath() default = %q", got)
 	}
 }

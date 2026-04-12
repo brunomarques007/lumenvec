@@ -64,7 +64,7 @@ func (vc *VectorClient) AddVectors(vectors []VectorPayload) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("failed to add vectors: %s", resp.Status)
@@ -96,7 +96,7 @@ func (vc *VectorClient) SearchVectors(queries []BatchSearchQuery) ([]BatchSearch
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to search vectors: %s", resp.Status)
@@ -120,7 +120,7 @@ func (vc *VectorClient) DeleteVector(id string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("failed to delete vector: %s", resp.Status)

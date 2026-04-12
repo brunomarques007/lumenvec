@@ -55,7 +55,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "client init failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	fmt.Printf("Ingesting %d vectors in batches of %d against %s via %s\n", *vectors, *batchSize, target, *transport)
 	namespace := namespaceOffset(*prefix)

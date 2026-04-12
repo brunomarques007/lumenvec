@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ type countingVectorStore struct {
 	mu      sync.Mutex
 	vectors map[string]index.Vector
 	gets    int
+	closed  bool
 }
 
 func newCountingVectorStore() *countingVectorStore {
@@ -51,6 +53,50 @@ func (s *countingVectorStore) ListVectors() []index.Vector {
 		out = append(out, index.Vector{ID: vec.ID, Values: cloneVectorValues(vec.Values)})
 	}
 	return out
+}
+
+func (s *countingVectorStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return nil
+}
+
+type readOnlyCountingVectorStore struct {
+	*countingVectorStore
+	readOnlyGets int
+}
+
+func (s *readOnlyCountingVectorStore) GetVectorReadOnly(id string) (index.Vector, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readOnlyGets++
+	vec, ok := s.vectors[id]
+	if !ok {
+		return index.Vector{}, index.ErrVectorNotFound
+	}
+	return vec, nil
+}
+
+type persistentCountingStore struct {
+	*countingVectorStore
+	diskStats DiskStoreStats
+}
+
+func (s *persistentCountingStore) IsPersistent() bool {
+	return true
+}
+
+func (s *persistentCountingStore) DiskStats() DiskStoreStats {
+	return s.diskStats
+}
+
+type failingDeleteStore struct {
+	*countingVectorStore
+}
+
+func (s *failingDeleteStore) DeleteVector(string) error {
+	return errors.New("delete failed")
 }
 
 func TestCachedVectorStoreHit(t *testing.T) {
@@ -211,4 +257,179 @@ func TestCachedVectorStoreConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestCachedVectorStoreReadOnlyAndBackendPassthroughs(t *testing.T) {
+	backend := &readOnlyCountingVectorStore{countingVectorStore: newCountingVectorStore()}
+	if err := backend.UpsertVector(index.Vector{ID: "a", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newCachedVectorStore(backend, CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2})
+	cached, ok := store.(*cachedVectorStore)
+	if !ok {
+		t.Fatal("expected cachedVectorStore")
+	}
+
+	vec, err := cached.GetVectorReadOnly("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vec.ID != "a" || backend.readOnlyGets != 1 {
+		t.Fatal("expected read-only backend path")
+	}
+
+	vec.Values[0] = 99
+	vec2, err := cached.GetVectorReadOnly("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vec2.Values[0] == 99 {
+		t.Fatal("expected cached read-only value to remain immutable from caller perspective")
+	}
+
+	if len(cached.ListVectors()) != 1 {
+		t.Fatal("expected list vectors passthrough")
+	}
+	if err := cached.Close(); err != nil || !backend.closed {
+		t.Fatal("expected close passthrough")
+	}
+}
+
+func TestCachedVectorStorePersistenceAndDiskStatsPassthrough(t *testing.T) {
+	backend := &persistentCountingStore{
+		countingVectorStore: newCountingVectorStore(),
+		diskStats: DiskStoreStats{
+			FileBytes:    123,
+			Records:      4,
+			StaleRecords: 1,
+			Compactions:  2,
+		},
+	}
+	store := newCachedVectorStore(backend, CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2})
+	cached := store.(*cachedVectorStore)
+
+	if !cached.IsPersistent() {
+		t.Fatal("expected persistent backend passthrough")
+	}
+	stats := cached.DiskStats()
+	if stats.FileBytes != 123 || stats.Compactions != 2 {
+		t.Fatal("expected disk stats passthrough")
+	}
+}
+
+func TestCachedVectorStorePutUpdateAndHelpers(t *testing.T) {
+	store := newCachedVectorStore(newCountingVectorStore(), CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2})
+	cached := store.(*cachedVectorStore)
+
+	cached.mu.Lock()
+	cached.putLocked(index.Vector{ID: "a", Values: []float64{1, 2, 3}})
+	firstExpiry := cached.entries["a"].Value.(*cacheEntry).expiresAt
+	cached.putLocked(index.Vector{ID: "a", Values: []float64{4, 5, 6}})
+	cached.currentBytes = -5
+	cached.mu.Unlock()
+
+	stats := cached.Stats()
+	if stats.Items != 1 || stats.Bytes != 0 {
+		t.Fatal("expected updated entry and non-negative bytes")
+	}
+	if !firstExpiry.Equal(time.Time{}) && cached.entries["a"].Value.(*cacheEntry).expiresAt.Before(firstExpiry) {
+		t.Fatal("expected expiry to move forward or remain zero")
+	}
+
+	if maxInt64(5, 1) != 5 || maxInt64(-1, 0) != 0 {
+		t.Fatal("unexpected maxInt64 result")
+	}
+}
+
+func TestCachedVectorStoreDisabledAndMissPaths(t *testing.T) {
+	backend := newCountingVectorStore()
+	store := newCachedVectorStore(backend, CacheOptions{})
+	if store != backend {
+		t.Fatal("expected disabled cache to return backend directly")
+	}
+
+	cached := newCachedVectorStore(newCountingVectorStore(), CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2}).(*cachedVectorStore)
+	if _, ok := cached.getCachedReadOnly("missing"); ok {
+		t.Fatal("expected cache miss")
+	}
+	if _, err := cached.GetVectorReadOnly("missing"); !errors.Is(err, index.ErrVectorNotFound) {
+		t.Fatal("expected backend miss")
+	}
+}
+
+func TestCachedVectorStoreDeleteErrorAndCloseWithoutCloser(t *testing.T) {
+	store := newCachedVectorStore(&failingDeleteStore{countingVectorStore: newCountingVectorStore()}, CacheOptions{
+		Enabled:  true,
+		MaxBytes: 1024,
+		MaxItems: 2,
+	}).(*cachedVectorStore)
+	if err := store.DeleteVector("missing"); err == nil {
+		t.Fatal("expected delete error")
+	}
+
+	noCloser := newCachedVectorStore(struct{ VectorStore }{VectorStore: newMemoryVectorStore()}, CacheOptions{
+		Enabled:  true,
+		MaxBytes: 1024,
+		MaxItems: 2,
+	}).(*cachedVectorStore)
+	if err := noCloser.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCachedVectorStoreDefaultsAndFallbackReadOnlyPath(t *testing.T) {
+	store := newCachedVectorStore(nil, CacheOptions{Enabled: true})
+	cached, ok := store.(*cachedVectorStore)
+	if !ok {
+		t.Fatal("expected cached vector store with default backend")
+	}
+	if cached.backend == nil || cached.maxBytes != 8<<20 || cached.maxItems != 1024 {
+		t.Fatal("expected default cache configuration")
+	}
+
+	if err := cached.UpsertVector(index.Vector{ID: "a", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+	vec, err := cached.GetVectorReadOnly("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vec.ID != "a" {
+		t.Fatal("expected fallback read-only path through regular backend")
+	}
+
+	cached.mu.Lock()
+	elem := cached.entries["a"]
+	cached.removeElementLocked(nil)
+	cached.removeElementLocked(elem)
+	cached.mu.Unlock()
+	if _, ok := cached.entries["a"]; ok {
+		t.Fatal("expected element removal")
+	}
+}
+
+func TestCachedVectorStoreReadOnlyCacheHitAndExpiry(t *testing.T) {
+	backend := &readOnlyCountingVectorStore{countingVectorStore: newCountingVectorStore()}
+	if err := backend.UpsertVector(index.Vector{ID: "a", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+	cached := newCachedVectorStore(backend, CacheOptions{
+		Enabled:  true,
+		MaxBytes: 1024,
+		MaxItems: 2,
+		TTL:      10 * time.Millisecond,
+	}).(*cachedVectorStore)
+
+	if _, err := cached.GetVectorReadOnly("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cached.getCachedReadOnly("a"); !ok {
+		t.Fatal("expected read-only cache hit")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	if _, ok := cached.getCachedReadOnly("a"); ok {
+		t.Fatal("expected expired read-only entry")
+	}
 }

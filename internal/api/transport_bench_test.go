@@ -30,7 +30,7 @@ func BenchmarkTransportSearch(b *testing.B) {
 	defer httpServer.Close()
 
 	grpcConn := benchmarkGRPCConn(b, svc)
-	defer grpcConn.Close()
+	defer func() { _ = grpcConn.Close() }()
 	grpcClient := lumenvecpb.NewVectorServiceClient(grpcConn)
 
 	b.Run("http_search", func(b *testing.B) {
@@ -46,7 +46,7 @@ func BenchmarkTransportSearch(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				b.Fatalf("unexpected status %d", resp.StatusCode)
 			}
@@ -76,7 +76,7 @@ func BenchmarkTransportBatchSearch(b *testing.B) {
 	defer httpServer.Close()
 
 	grpcConn := benchmarkGRPCConn(b, svc)
-	defer grpcConn.Close()
+	defer func() { _ = grpcConn.Close() }()
 	grpcClient := lumenvecpb.NewVectorServiceClient(grpcConn)
 
 	httpQueries := make([]map[string]any, 0, 16)
@@ -99,7 +99,7 @@ func BenchmarkTransportBatchSearch(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				b.Fatalf("unexpected status %d", resp.StatusCode)
 			}

@@ -46,7 +46,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "mktemp: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	fmt.Printf("Coverage threshold: %.1f%%\n", threshold)
 
@@ -65,10 +65,10 @@ func main() {
 		}
 
 		if total < threshold {
-			fmt.Printf("FAIL  %-24s %6.1f%%\n", pkg, total)
+			fmt.Printf("FAIL  %-24s %6.1f%% (threshold %.1f%%)\n", pkg, total, threshold)
 			failed = true
 		} else {
-			fmt.Printf("PASS  %-24s %6.1f%%\n", pkg, total)
+			fmt.Printf("PASS  %-24s %6.1f%% (threshold %.1f%%)\n", pkg, total, threshold)
 		}
 	}
 

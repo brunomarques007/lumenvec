@@ -121,7 +121,7 @@ func TestGRPCVectorClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	health, err := client.Health()
 	if err != nil || health != "ok" {
@@ -143,6 +143,70 @@ func TestGRPCVectorClientLifecycle(t *testing.T) {
 		t.Fatal("expected grpc batch search result")
 	}
 	if err := client.DeleteVector("doc-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGRPCVectorClientConstructorsAndBatchPaths(t *testing.T) {
+	base := t.TempDir()
+	svc := core.NewService(core.ServiceOptions{
+		MaxVectorDim:  16,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "ann",
+	})
+
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	lumenvecpb.RegisterVectorServiceServer(server, &testVectorService{service: svc})
+	defer server.Stop()
+	go func() { _ = server.Serve(listener) }()
+
+	client, err := NewGRPCVectorClient("passthrough:///bufnet")
+	if err == nil {
+		_ = client.Close()
+	}
+
+	client, err = NewGRPCVectorClientWithDialer("passthrough:///bufnet", []grpc.DialOption{
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	if err := client.AddVector([]float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AddVectors([]VectorPayload{{ID: "doc-2", Values: []float64{2, 3, 4}}}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := client.SearchVectors([]BatchSearchQuery{{ID: "q1", Values: []float64{2, 3, 4}, K: 1}})
+	if err != nil || len(results) != 1 {
+		t.Fatal("expected grpc batch search result")
+	}
+}
+
+func TestGRPCVectorClientNilAndConversionHelpers(t *testing.T) {
+	if err := (&GRPCVectorClient{}).Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := fromProtoSearchResults([]*lumenvecpb.SearchResult{{Id: "a", Distance: 0.1}})
+	if len(out) != 1 || out[0].ID != "a" {
+		t.Fatal("expected proto conversion")
+	}
+}
+
+func TestGRPCVectorClientDefaultConstructor(t *testing.T) {
+	client, err := NewGRPCVectorClient("dns:///localhost:19191")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

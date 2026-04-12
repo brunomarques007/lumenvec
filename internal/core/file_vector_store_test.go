@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -120,5 +121,124 @@ func TestFileVectorStoreCompactsStaleRecords(t *testing.T) {
 	}
 	if vec.Values[0] != 19 {
 		t.Fatal("expected latest value after compaction and reopen")
+	}
+}
+
+func TestFileVectorStoreStatsAndClosePaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vectors")
+	store := newFileVectorStore(path)
+	if err := store.UpsertVector(index.Vector{ID: "doc-1", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertVector(index.Vector{ID: "doc-1", Values: []float64{4, 5, 6}}); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := store.DiskStats()
+	if stats.FileBytes == 0 || stats.Records == 0 {
+		t.Fatal("expected disk stats to be populated")
+	}
+	if !store.IsPersistent() {
+		t.Fatal("expected persistent vector store")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetVectorReadOnly("doc-1"); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("expected os.ErrClosed, got %v", err)
+	}
+	if got := store.ListVectors(); got != nil {
+		t.Fatal("expected nil vectors after close")
+	}
+}
+
+func TestFileVectorStoreHelpersAndDecodeErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vectors")
+	store := newFileVectorStore(path)
+	t.Cleanup(func() { _ = store.Close() })
+
+	record, err := encodeFileVectorRecord(fileVectorStoreOpPut, "doc-1", []float64{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeFileVectorPayload([]byte{1, 2, 3}); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatal("expected short payload error")
+	}
+	if _, err := decodeFileVectorPayload(record[4 : len(record)-1]); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatal("expected truncated payload error")
+	}
+
+	file, err := os.OpenFile(filepath.Join(path, fileVectorStoreDataFile), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	if _, err := file.Write(record[:len(record)-1]); err != nil {
+		t.Fatal(err)
+	}
+	meta := fileVectorRecordMeta{recordOffset: 0, recordLength: uint32(len(record))}
+	if _, err := readFileVectorRecordAt(file, meta); !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		t.Fatalf("expected eof, got %v", err)
+	}
+}
+
+func TestFileVectorStoreReopenAndRebuildHelpers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vectors")
+	store := newFileVectorStore(path)
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.UpsertVector(index.Vector{ID: "doc-1", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertVector(index.Vector{ID: "doc-2", Values: []float64{2, 3, 4}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteVector("doc-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ensureOpenLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := os.Open(filepath.Join(path, fileVectorStoreDataFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+
+	offsets, stats, err := rebuildFileVectorStoreIndex(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offsets) != 1 || offsets["doc-2"].recordLength == 0 {
+		t.Fatal("expected rebuilt index to keep only live vector")
+	}
+	if stats.totalRecords == 0 || stats.staleRecords == 0 {
+		t.Fatal("expected rebuilt stats to track total and stale records")
+	}
+}
+
+func TestFileVectorStoreOpenLockedFailure(t *testing.T) {
+	base := t.TempDir()
+	filePath := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fileVectorStore{
+		basePath: filePath,
+		dataPath: filepath.Join(filePath, fileVectorStoreDataFile),
+		offsets:  make(map[string]fileVectorRecordMeta),
+	}
+	if err := store.open(); err == nil {
+		t.Fatal("expected open failure when base path is a file")
 	}
 }

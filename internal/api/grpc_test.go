@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"sync"
@@ -10,9 +11,12 @@ import (
 
 	lumenvecpb "lumenvec/api/proto"
 	"lumenvec/internal/core"
+	"lumenvec/internal/index"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -45,7 +49,7 @@ func TestGRPCVectorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := lumenvecpb.NewVectorServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -116,7 +120,7 @@ func TestGRPCConcurrentSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := lumenvecpb.NewVectorServiceClient(conn)
 	var wg sync.WaitGroup
@@ -133,4 +137,55 @@ func TestGRPCConcurrentSearch(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestGRPCBatchAndErrorMappings(t *testing.T) {
+	base := t.TempDir()
+	handler := &grpcHandler{service: core.NewService(core.ServiceOptions{
+		MaxVectorDim:  16,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "ann",
+	})}
+
+	if _, err := handler.AddVectorsBatch(context.Background(), &lumenvecpb.AddVectorsBatchRequest{
+		Vectors: []*lumenvecpb.Vector{{Id: "doc-1", Values: []float64{1, 2, 3}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := handler.SearchBatch(context.Background(), &lumenvecpb.SearchBatchRequest{
+		Queries: []*lumenvecpb.SearchBatchQuery{{Id: "q1", Values: []float64{1, 2, 3}, TopK: 1}},
+	})
+	if err != nil || len(resp.GetResults()) != 1 || resp.GetResults()[0].GetId() != "q1" {
+		t.Fatal("expected grpc batch search result")
+	}
+
+	if _, err := handler.AddVector(context.Background(), &lumenvecpb.AddVectorRequest{}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument, got %v", err)
+	}
+	if _, err := handler.GetVector(context.Background(), &lumenvecpb.GetVectorRequest{Id: "missing"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("expected not found, got %v", err)
+	}
+	if _, err := handler.DeleteVector(context.Background(), &lumenvecpb.DeleteVectorRequest{Id: "missing"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("expected not found, got %v", err)
+	}
+
+	if grpcStatusFromError(nil) != nil {
+		t.Fatal("expected nil grpc error")
+	}
+	if status.Code(grpcStatusFromError(index.ErrVectorExists)) != codes.AlreadyExists {
+		t.Fatal("expected already exists code")
+	}
+	if status.Code(grpcStatusFromError(index.ErrVectorNotFound)) != codes.NotFound {
+		t.Fatal("expected not found code")
+	}
+	if status.Code(grpcStatusFromError(core.ErrInvalidValues)) != codes.InvalidArgument {
+		t.Fatal("expected invalid argument code")
+	}
+	if status.Code(grpcStatusFromError(errors.New("boom"))) != codes.Internal {
+		t.Fatal("expected internal code")
+	}
 }
