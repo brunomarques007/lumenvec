@@ -29,20 +29,7 @@ jobs:
         id: release
         shell: bash
         run: |
-          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
-          if [[ -z "$latest_tag" ]]; then
-            latest_tag="v0.0.0"
-          fi
-
-          if [[ ! "$latest_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Latest tag $latest_tag does not match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
-          version="v${major}.${minor}.$((patch + 1))"
+          eval "$(bash scripts/compute-next-version.sh patch)"
           branch="release/dev-to-main-${version}"
 
           mkdir -p dist/release
@@ -85,6 +72,11 @@ jobs:
               `Target branch: \`${base}\``,
               "",
               `Release version: \`${version}\``,
+              "Default bump: `patch`",
+              "",
+              "Override labels:",
+              "- `release:minor` for a minor release",
+              "- `release:major` for a major release",
               "",
               "This draft PR was opened automatically after the release workflow completed successfully on `dev` and includes the generated changelog update."
             ].join("\n");
@@ -107,6 +99,20 @@ jobs:
                 body: prBody,
                 state: "open"
               });
+              const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
+                owner,
+                repo,
+                issue_number: existing[0].number
+              });
+              const labelNames = currentLabels.map((label) => label.name);
+              if (!labelNames.includes("release:patch") && !labelNames.includes("release:minor") && !labelNames.includes("release:major")) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: existing[0].number,
+                  labels: ["release:patch"]
+                });
+              }
               return;
             }
 
@@ -122,7 +128,7 @@ jobs:
               return;
             }
 
-            await github.rest.pulls.create({
+            const created = await github.rest.pulls.create({
               owner,
               repo,
               head,
@@ -130,4 +136,11 @@ jobs:
               title: prTitle,
               body: prBody,
               draft: true
+            });
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: created.data.number,
+              labels: ["release:patch"]
             });

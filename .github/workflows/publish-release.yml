@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   prepare-release:
@@ -15,6 +16,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
+      bump: ${{ steps.version.outputs.bump }}
 
     steps:
       - name: Checkout
@@ -23,26 +25,28 @@ jobs:
           fetch-depth: 0
 
       - name: Compute next version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         id: version
         shell: bash
         run: |
-          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
-          if [[ -z "$latest_tag" ]]; then
-            latest_tag="v0.0.0"
+          bump="patch"
+          pr_json="$(gh pr list --state merged --base main --search "${GITHUB_SHA}" --json number,mergeCommit,labels --limit 10)"
+          pr_number="$(echo "$pr_json" | jq -r '.[] | select(.mergeCommit.oid == env.GITHUB_SHA) | .number' | head -n 1)"
+
+          if [[ -n "$pr_number" ]]; then
+            labels="$(echo "$pr_json" | jq -r '.[] | select(.number == '"$pr_number"') | .labels[].name')"
+            if echo "$labels" | grep -qx 'release:major'; then
+              bump="major"
+            elif echo "$labels" | grep -qx 'release:minor'; then
+              bump="minor"
+            fi
           fi
 
-          if [[ ! "$latest_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Latest tag $latest_tag does not match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
-          version="v${major}.${minor}.$((patch + 1))"
-
+          eval "$(bash scripts/compute-next-version.sh "$bump")"
           echo "value=$version" >> "$GITHUB_OUTPUT"
-          echo "previous_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
 
       - name: Ensure tag does not already exist
         shell: bash
