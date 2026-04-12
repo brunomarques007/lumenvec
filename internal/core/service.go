@@ -703,13 +703,7 @@ func (s *Service) ensureRuntimeDeps() {
 	if s.vectorStore == nil {
 		s.vectorStore = newMemoryVectorStore()
 	}
-	if s.annIndex == nil {
-		s.annMu.Lock()
-		if s.annIndex == nil {
-			s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
-		}
-		s.annMu.Unlock()
-	}
+	_ = s.currentANNIndex()
 	if s.idResolver == nil {
 		s.idResolver = newMemoryIDResolver()
 	}
