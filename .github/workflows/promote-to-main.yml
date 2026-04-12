@@ -6,7 +6,7 @@ on:
     types: [completed]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -19,23 +19,74 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Prepare changelog branch
+        id: release
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
+          if [[ -z "$latest_tag" ]]; then
+            latest_tag="v0.0.0"
+          fi
+
+          if [[ ! "$latest_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Latest tag $latest_tag does not match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          version="v${major}.${minor}.$((patch + 1))"
+          branch="release/dev-to-main-${version}"
+
+          mkdir -p dist/release
+          bash scripts/generate-release-notes.sh "$version" "$latest_tag" > dist/release/release-notes.md
+          bash scripts/update-changelog.sh "$version" dist/release/release-notes.md CHANGELOG.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git add CHANGELOG.md
+            git commit -m "docs(changelog): update for ${version}"
+            git push origin "HEAD:${branch}" --force
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "head=${branch}" >> "$GITHUB_OUTPUT"
+
       - name: Create or update PR to main
+        if: steps.release.outputs.changed == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const head = "dev";
+            const head = "${{ steps.release.outputs.head }}";
             const base = "main";
 
             const { owner, repo } = context.repo;
-            const prTitle = `Release ${head} to ${base}`;
+            const version = "${{ steps.release.outputs.version }}";
+            const prTitle = `Release ${version} to ${base}`;
             const prBody = [
               "## Automated release promotion",
               "",
-              `Source branch: \`${head}\``,
+              `Source branch: \`dev\``,
+              `Promotion branch: \`${head}\``,
               `Target branch: \`${base}\``,
               "",
-              "This draft PR was opened automatically after the release workflow completed successfully on `dev`."
+              `Release version: \`${version}\``,
+              "",
+              "This draft PR was opened automatically after the release workflow completed successfully on `dev` and includes the generated changelog update."
             ].join("\n");
 
             const { data: existing } = await github.rest.pulls.list({

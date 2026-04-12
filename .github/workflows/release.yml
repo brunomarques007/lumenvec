@@ -112,18 +112,7 @@ jobs:
         run: |
           tag="${{ needs.prepare-release.outputs.version }}"
           previous="${{ needs.prepare-release.outputs.previous_tag }}"
-          {
-            echo "## ${tag}"
-            echo
-            echo "Automated release preparation from \`${previous}\` to \`${tag}\`."
-            echo
-            echo "### Commits"
-            git log --no-merges --pretty='- %s (%h)' "${previous}..HEAD"
-          } > dist/release/release-notes.md
-
-          if ! grep -q '^-' dist/release/release-notes.md; then
-            echo "- No user-facing commits since ${previous}" >> dist/release/release-notes.md
-          fi
+          bash scripts/generate-release-notes.sh "$tag" "$previous" > dist/release/release-notes.md
 
       - name: Upload merged release assets
         uses: actions/upload-artifact@v4

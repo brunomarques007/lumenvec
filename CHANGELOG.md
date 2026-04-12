@@ -6,6 +6,30 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-04-12
+
+Automated release from `v0.2.1` to `v0.2.2`.
+
+### Commits
+- Automate release versioning (817d96b)
+- Refine CI and promotion workflow triggers (4b0fd72)
+
+## [v0.2.1] - 2026-04-12
+
+Patch release focused on CI stabilization, automated promotion workflow support, and stronger test validation.
+
+### Highlights
+- Fixed GitHub Actions lint configuration for `golangci-lint` v2
+- Eliminated the ANN race condition found by `go test -race`
+- Increased real package coverage, including `internal/core` above the `90%` threshold
+- Expanded local validation so CI, lint, coverage, and race checks align more closely
+
+### Included in this release
+- Automated branch-promotion workflows for `feature/* -> dev -> main`
+- Release preparation on `dev` and GitHub Release publication on `main`
+- Additional unit tests for server startup, gRPC handlers, client flows, cache/store behavior, and persistence
+- Release packaging updates with explicit per-platform, per-transport bundle names
+
 ## [v0.2.0]
 
 ### Added

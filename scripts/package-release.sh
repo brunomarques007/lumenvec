@@ -15,7 +15,7 @@ if ! command -v "$GO_BIN" >/dev/null 2>&1; then
   fi
 fi
 
-VERSION="${VERSION:-$(tr -d '\r\n' < VERSION)}"
+VERSION="${VERSION:-$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || echo dev)}"
 GOOS_TARGET="${GOOS:-$("$GO_BIN" env GOOS)}"
 GOARCH_TARGET="${GOARCH:-$("$GO_BIN" env GOARCH)}"
 DIST_DIR="${DIST_DIR:-dist/release}"
@@ -42,7 +42,7 @@ build_bundle() {
   cp "$config_file" "$bundle_dir/config.yaml"
   cp README.md "$bundle_dir/README.md"
   cp LICENSE "$bundle_dir/LICENSE"
-  cp RELEASE.md "$bundle_dir/RELEASE.md"
+  cp CHANGELOG.md "$bundle_dir/CHANGELOG.md"
   cat > "$bundle_dir/BUILD_INFO.txt" <<EOF
 LumenVec release bundle
 Version: $VERSION
