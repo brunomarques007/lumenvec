@@ -236,7 +236,12 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 			return err
 		}
 		internalID := s.idResolver.Assign(vec.ID)
-		s.addANNVector(internalID, vec.Values)
+		if err := s.addANNVector(internalID, vec.Values); err != nil {
+			_ = s.vectorStore.DeleteVector(vec.ID)
+			_ = s.index.DeleteVector(vec.ID)
+			s.rollbackAddedVectors(addedIDs)
+			return err
+		}
 		addedIDs = append(addedIDs, vec.ID)
 	}
 
@@ -619,7 +624,9 @@ func (s *Service) loadSnapshot() error {
 			return err
 		}
 		internalID := s.idResolver.Assign(id)
-		s.addANNVector(internalID, values)
+		if err := s.addANNVector(internalID, values); err != nil {
+			return err
+		}
 	}
 	return nil
 }

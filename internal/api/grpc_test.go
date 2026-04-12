@@ -49,7 +49,7 @@ func TestGRPCVectorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := lumenvecpb.NewVectorServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -120,7 +120,7 @@ func TestGRPCConcurrentSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := lumenvecpb.NewVectorServiceClient(conn)
 	var wg sync.WaitGroup

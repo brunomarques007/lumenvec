@@ -54,3 +54,26 @@ func TestMustRun(t *testing.T) {
 	}()
 	mustRun(func(string, io.Writer) error { return errors.New("boom") }, "x", &bytes.Buffer{})
 }
+
+func TestRunWriteFailures(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/vectors/batch", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("/vectors/search/batch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"query-0","results":[{"id":"doc-1","distance":0.1}]}]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if err := run(srv.URL, failWriter{}); err == nil {
+		t.Fatal("expected writer failure")
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}

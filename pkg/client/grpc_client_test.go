@@ -121,7 +121,7 @@ func TestGRPCVectorClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	health, err := client.Health()
 	if err != nil || health != "ok" {
@@ -176,7 +176,7 @@ func TestGRPCVectorClientConstructorsAndBatchPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.AddVector([]float64{1, 2, 3}); err != nil {
 		t.Fatal(err)

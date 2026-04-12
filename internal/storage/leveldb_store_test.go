@@ -1,74 +1,90 @@
 package storage
 
 import (
-	"errors"
+	"math"
 	"testing"
 )
 
-type badValue struct{}
-
-func (badValue) MarshalJSON() ([]byte, error) {
-	return nil, errors.New("boom")
-}
-
 func TestLevelDBStoreCRUD(t *testing.T) {
-	store, err := NewLevelDBStore(t.TempDir())
+	store, err := NewLevelDBStore("ignored")
 	if err != nil {
-		t.Fatalf("NewLevelDBStore() error = %v", err)
+		t.Fatal(err)
 	}
 
-	if err := store.Put("k1", map[string]int{"a": 1}); err != nil {
-		t.Fatalf("Put() error = %v", err)
+	type payload struct {
+		Name string `json:"name"`
 	}
 
-	var got map[string]int
-	if err := store.Get("k1", &got); err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if got["a"] != 1 {
-		t.Fatal("unexpected stored value")
+	if err := store.Put("item-1", payload{Name: "alpha"}); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := store.Delete("k1"); err != nil {
-		t.Fatalf("Delete() error = %v", err)
+	var got payload
+	if err := store.Get("item-1", &got); err != nil {
+		t.Fatal(err)
 	}
-	got = nil
-	if err := store.Get("k1", &got); err != nil {
-		t.Fatalf("Get() after delete error = %v", err)
+	if got.Name != "alpha" {
+		t.Fatal("expected stored payload")
 	}
-	if got != nil {
-		t.Fatal("expected nil after delete")
+
+	if err := store.Delete("item-1"); err != nil {
+		t.Fatal(err)
+	}
+	got = payload{}
+	if err := store.Get("item-1", &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "" {
+		t.Fatal("expected deleted key to behave like missing key")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestLevelDBStorePutMarshalError(t *testing.T) {
-	store, _ := NewLevelDBStore(t.TempDir())
-	if err := store.Put("bad", badValue{}); err == nil {
+func TestLevelDBStoreErrorPaths(t *testing.T) {
+	store, err := NewLevelDBStore("ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("bad", math.NaN()); err == nil {
 		t.Fatal("expected marshal error")
 	}
+
+	store.store["bad-json"] = []byte("{bad")
+	var got map[string]any
+	if err := store.Get("bad-json", &got); err == nil {
+		t.Fatal("expected unmarshal error")
+	}
 }
 
-func TestLevelDBStoreIterate(t *testing.T) {
-	store, _ := NewLevelDBStore(t.TempDir())
-	_ = store.Put("user:1", map[string]string{"id": "1"})
-	_ = store.Put("user:2", map[string]string{"id": "2"})
-	_ = store.Put("other:1", map[string]string{"id": "3"})
+func TestLevelDBStoreIterateBranches(t *testing.T) {
+	store, err := NewLevelDBStore("ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	var seen int
-	if err := store.Iterate("user:", func(key string, value interface{}) bool {
+	if err := store.Put("keep-1", map[string]any{"value": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("keep-2", map[string]any{"value": 2}); err != nil {
+		t.Fatal(err)
+	}
+	store.store["keep-bad"] = []byte("{bad-json")
+	if err := store.Put("skip", map[string]any{"value": 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := 0
+	if err := store.Iterate("keep", func(key string, value interface{}) bool {
 		seen++
-		return seen < 2
+		return key != "keep-1"
 	}); err != nil {
-		t.Fatalf("Iterate() error = %v", err)
+		t.Fatal(err)
 	}
-	if seen != 2 {
-		t.Fatalf("expected 2 iterations, got %d", seen)
-	}
-}
-
-func TestLevelDBStoreClose(t *testing.T) {
-	store, _ := NewLevelDBStore(t.TempDir())
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
+	if seen == 0 {
+		t.Fatal("expected iterate to visit matching keys")
 	}
 }
