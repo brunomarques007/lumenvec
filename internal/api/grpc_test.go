@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -32,8 +33,22 @@ func TestGRPCVectorLifecycle(t *testing.T) {
 	})
 
 	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	lumenvecpb.RegisterVectorServiceServer(server, &grpcHandler{service: svc})
+	apiServer := NewServerWithOptions(ServerOptions{
+		Port:          ":0",
+		ReadTimeout:   5 * time.Second,
+		WriteTimeout:  5 * time.Second,
+		MaxVectorDim:  16,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "ann",
+	})
+	apiServer.service = svc
+	server, err := apiServer.grpcServer()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer server.Stop()
 
 	go func() {
@@ -103,8 +118,22 @@ func TestGRPCConcurrentSearch(t *testing.T) {
 	}
 
 	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	lumenvecpb.RegisterVectorServiceServer(server, &grpcHandler{service: svc})
+	apiServer := NewServerWithOptions(ServerOptions{
+		Port:          ":0",
+		ReadTimeout:   5 * time.Second,
+		WriteTimeout:  5 * time.Second,
+		MaxVectorDim:  16,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "ann",
+	})
+	apiServer.service = svc
+	server, err := apiServer.grpcServer()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer server.Stop()
 
 	go func() {
@@ -187,5 +216,62 @@ func TestGRPCBatchAndErrorMappings(t *testing.T) {
 	}
 	if status.Code(grpcStatusFromError(errors.New("boom"))) != codes.Internal {
 		t.Fatal("expected internal code")
+	}
+}
+
+func TestGRPCAuthInterceptor(t *testing.T) {
+	base := t.TempDir()
+	server := NewServerWithOptions(ServerOptions{
+		Port:          ":0",
+		ReadTimeout:   5 * time.Second,
+		WriteTimeout:  5 * time.Second,
+		MaxVectorDim:  16,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+		AuthEnabled:   true,
+		AuthAPIKey:    "secret",
+		GRPCAuthEnabled: true,
+	})
+
+	listener := bufconn.Listen(1024 * 1024)
+	grpcServer, err := server.grpcServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grpcServer.Stop()
+
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return listener.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := lumenvecpb.NewVectorServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := client.AddVector(ctx, &lumenvecpb.AddVectorRequest{Id: "doc-1", Values: []float64{1, 2, 3}}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated without credentials, got %v", err)
+	}
+
+	authCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer secret"))
+	if _, err := client.AddVector(authCtx, &lumenvecpb.AddVectorRequest{Id: "doc-1", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatalf("expected authenticated grpc request, got %v", err)
+	}
+
+	if _, err := client.Health(ctx, &lumenvecpb.HealthRequest{}); err != nil {
+		t.Fatalf("expected health to remain public, got %v", err)
 	}
 }

@@ -33,3 +33,21 @@ search:
 grpc:
   enabled: true
   port: 19191
+
+security:
+  profile: "development"
+  auth:
+    enabled: false
+    api_key: ""
+    grpc_enabled: false
+  transport:
+    tls_enabled: false
+    cert_file: ""
+    key_file: ""
+  proxy:
+    trust_forwarded_for: false
+    trusted_proxies: []
+  storage:
+    strict_file_permissions: false
+    dir_mode: "0755"
+    file_mode: "0644"

@@ -15,6 +15,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
+      bump: ${{ steps.version.outputs.bump }}
 
     steps:
       - name: Checkout
@@ -26,23 +27,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
-          if [[ -z "$latest_tag" ]]; then
-            latest_tag="v0.0.0"
-          fi
-
-          if [[ ! "$latest_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Latest tag $latest_tag does not match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
-          version="v${major}.${minor}.$((patch + 1))"
-
+          eval "$(bash scripts/compute-next-version.sh patch)"
           echo "value=$version" >> "$GITHUB_OUTPUT"
-          echo "previous_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
 
       - name: Ensure tag does not already exist
         shell: bash
@@ -112,18 +100,7 @@ jobs:
         run: |
           tag="${{ needs.prepare-release.outputs.version }}"
           previous="${{ needs.prepare-release.outputs.previous_tag }}"
-          {
-            echo "## ${tag}"
-            echo
-            echo "Automated release preparation from \`${previous}\` to \`${tag}\`."
-            echo
-            echo "### Commits"
-            git log --no-merges --pretty='- %s (%h)' "${previous}..HEAD"
-          } > dist/release/release-notes.md
-
-          if ! grep -q '^-' dist/release/release-notes.md; then
-            echo "- No user-facing commits since ${previous}" >> dist/release/release-notes.md
-          fi
+          bash scripts/generate-release-notes.sh "$tag" "$previous" > dist/release/release-notes.md
 
       - name: Upload merged release assets
         uses: actions/upload-artifact@v4

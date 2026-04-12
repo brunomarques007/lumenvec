@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
 	"net"
+	"net/netip"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -19,9 +22,12 @@ import (
 )
 
 var (
-	listenAndServeFunc = func(server *http.Server) error { return server.ListenAndServe() }
-	logFatalfAPI       = log.Fatalf
-	logPrintfAPI       = log.Printf
+	listenAndServeFunc    = func(server *http.Server) error { return server.ListenAndServe() }
+	listenAndServeTLSFunc = func(server *http.Server, certFile, keyFile string) error {
+		return server.ListenAndServeTLS(certFile, keyFile)
+	}
+	logFatalfAPI = log.Fatalf
+	logPrintfAPI = log.Printf
 )
 
 type Server struct {
@@ -35,6 +41,13 @@ type Server struct {
 	service      *core.Service
 	maxBodyBytes int64
 	apiKey       string
+	authEnabled  bool
+	grpcAuth     bool
+	tlsEnabled   bool
+	tlsCertFile  string
+	tlsKeyFile   string
+	trustXFF     bool
+	trustedCIDRs []netip.Prefix
 	rateLimiter  *rateLimiter
 
 	requestTotal    *prometheus.CounterVec
@@ -93,6 +106,18 @@ type ServerOptions struct {
 	CacheTTL          time.Duration
 	GRPCEnabled       bool
 	GRPCPort          string
+	SecurityProfile   string
+	AuthEnabled       bool
+	AuthAPIKey        string
+	GRPCAuthEnabled   bool
+	TLSEnabled        bool
+	TLSCertFile       string
+	TLSKeyFile        string
+	TrustForwardedFor bool
+	TrustedProxies    []string
+	StrictFilePerms   bool
+	StorageDirMode    string
+	StorageFileMode   string
 }
 
 var defaultServerOptions = ServerOptions{
@@ -159,6 +184,11 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 			ANNEvalSampleRate: opts.ANNEvalSampleRate,
 			VectorStore:       opts.VectorStore,
 			VectorPath:        opts.VectorPath,
+			StorageSecurity: core.StorageSecurityOptions{
+				StrictFilePermissions: opts.StrictFilePerms,
+				DirMode:               core.ParseFileMode(opts.StorageDirMode, os.FileMode(0o755)),
+				FileMode:              core.ParseFileMode(opts.StorageFileMode, os.FileMode(0o644)),
+			},
 			Cache: core.CacheOptions{
 				Enabled:  opts.CacheEnabled,
 				MaxBytes: opts.CacheMaxBytes,
@@ -167,12 +197,84 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 			},
 		}),
 		maxBodyBytes: opts.MaxBodyBytes,
-		apiKey:       opts.APIKey,
+		apiKey:       firstNonEmpty(opts.AuthAPIKey, opts.APIKey),
+		authEnabled:  opts.AuthEnabled,
+		grpcAuth:     opts.GRPCAuthEnabled,
+		tlsEnabled:   opts.TLSEnabled,
+		tlsCertFile:  opts.TLSCertFile,
+		tlsKeyFile:   opts.TLSKeyFile,
+		trustXFF:     opts.TrustForwardedFor,
+		trustedCIDRs: parseTrustedProxies(opts.TrustedProxies),
 		rateLimiter:  newRateLimiter(opts.RateLimitRPS, time.Second),
 	}
 	s.requestTotal, s.requestDuration, s.metricsRegistry = newMetricsRegistry(s.service)
 	s.routes()
 	return s
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseTrustedProxies(values []string) []netip.Prefix {
+	parsed := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			parsed = append(parsed, prefix)
+			continue
+		}
+		if addr, err := netip.ParseAddr(value); err == nil {
+			parsed = append(parsed, netip.PrefixFrom(addr, addr.BitLen()))
+		}
+	}
+	return parsed
+}
+
+func (s *Server) isTrustedProxy(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil {
+		return false
+	}
+	for _, prefix := range s.trustedCIDRs {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateAPIKey(provided, expected string) bool {
+	provided = strings.TrimSpace(provided)
+	expected = strings.TrimSpace(expected)
+	if provided == "" || expected == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func authKeyFromHTTPRequest(r *http.Request) string {
+	key := strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if key != "" {
+		return key
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return ""
 }
 
 func applyDefaults(opts ServerOptions) ServerOptions {
@@ -420,7 +522,13 @@ func (s *Server) Start() {
 	}
 	logPrintfAPI("Starting HTTP server on port %s", s.port)
 	server := s.httpServer()
-	if err := listenAndServeFunc(server); err != nil {
+	var err error
+	if s.tlsEnabled {
+		err = listenAndServeTLSFunc(server, s.tlsCertFile, s.tlsKeyFile)
+	} else {
+		err = listenAndServeFunc(server)
+	}
+	if err != nil {
 		logFatalfAPI("Could not start server: %s", err)
 	}
 }

@@ -267,7 +267,8 @@ func TestAPIKeyAuth(t *testing.T) {
 		Port:         ":0",
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
-		APIKey:       "secret-key",
+		AuthEnabled:  true,
+		AuthAPIKey:   "secret-key",
 		SnapshotPath: filepath.Join(t.TempDir(), "snapshot.json"),
 	})
 

@@ -63,6 +63,20 @@ func (rl *rateLimiter) allow(key string) bool {
 	return true
 }
 
+func (s *Server) getClientIP(r *http.Request) string {
+	if s != nil && s.trustXFF && len(s.trustedCIDRs) > 0 && s.isTrustedProxy(r.RemoteAddr) {
+		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 func getClientIP(r *http.Request) string {
 	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
 		parts := strings.Split(xff, ",")
@@ -77,20 +91,14 @@ func getClientIP(r *http.Request) string {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey == "" || r.URL.Path == "/health" || r.URL.Path == "/metrics" {
+		if !s.authEnabled || s.apiKey == "" || r.URL.Path == "/health" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		key := strings.TrimSpace(r.Header.Get("X-API-Key"))
-		if key == "" {
-			auth := strings.TrimSpace(r.Header.Get("Authorization"))
-			if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-				key = strings.TrimSpace(auth[7:])
-			}
-		}
+		key := authKeyFromHTTPRequest(r)
 
-		if key != s.apiKey {
+		if !validateAPIKey(key, s.apiKey) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -104,7 +112,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ip := getClientIP(r)
+		ip := s.getClientIP(r)
 		if !s.rateLimiter.allow(ip) {
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -1081,6 +1082,72 @@ func TestServicePersistenceBackendAndFactoryBranches(t *testing.T) {
 
 	if diskDefault := newDefaultVectorStore("disk", ""); diskDefault == nil {
 		t.Fatal("expected disk default store")
+	}
+}
+
+func TestStorageSecurityOptionsParsing(t *testing.T) {
+	opts := storageSecurityOptionsFromStrings(true, "", "")
+	if !opts.StrictFilePermissions || opts.DirMode != 0o700 || opts.FileMode != 0o600 {
+		t.Fatal("expected strict defaults")
+	}
+
+	opts = storageSecurityOptionsFromStrings(false, "0711", "0640")
+	if opts.DirMode != 0o711 || opts.FileMode != 0o640 {
+		t.Fatal("expected parsed file modes")
+	}
+
+	path := filepath.Join(t.TempDir(), "mode.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mode, err := storagePathMode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode == 0 {
+		t.Fatal("expected non-zero file mode")
+	}
+}
+
+func TestSnapshotWALBackendUsesConfiguredPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not reliable on Windows")
+	}
+	base := t.TempDir()
+	storageDir := filepath.Join(base, "secure")
+	snapshotPath := filepath.Join(storageDir, "snapshot.json")
+	walPath := filepath.Join(storageDir, "wal.log")
+	backend := newSnapshotWALBackendWithSecurity(snapshotPath, walPath, StrictStorageSecurityOptions())
+
+	if err := backend.SaveSnapshot([]index.Vector{{ID: "a", Values: []float64{1, 2, 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AppendWAL(walOp{Op: "upsert", ID: "a", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+
+	dirMode, err := storagePathMode(storageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirMode != 0o700 {
+		t.Fatalf("expected dir mode 0700, got %o", dirMode)
+	}
+
+	snapshotMode, err := storagePathMode(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshotMode != 0o600 {
+		t.Fatalf("expected snapshot mode 0600, got %o", snapshotMode)
+	}
+
+	walMode, err := storagePathMode(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walMode != 0o600 {
+		t.Fatalf("expected wal mode 0600, got %o", walMode)
 	}
 }
 

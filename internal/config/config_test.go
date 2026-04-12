@@ -27,6 +27,12 @@ func TestLoadDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.Search.ANNEvalSampleRate != 0 {
 		t.Fatal("expected default ann eval sample rate")
 	}
+	if cfg.Security.Profile != "development" {
+		t.Fatal("expected default development security profile")
+	}
+	if cfg.Security.Storage.DirMode != "0755" || cfg.Security.Storage.FileMode != "0644" {
+		t.Fatal("expected relaxed development file modes")
+	}
 }
 
 func TestLoadFromFileAndEnv(t *testing.T) {
@@ -63,11 +69,29 @@ search:
 grpc:
   enabled: true
   port: 21000
+security:
+  profile: "production"
+  auth:
+    enabled: true
+    api_key: "file-secret"
+    grpc_enabled: true
+  transport:
+    tls_enabled: true
+    cert_file: "./cert.pem"
+    key_file: "./key.pem"
+  proxy:
+    trust_forwarded_for: true
+    trusted_proxies: ["10.0.0.1", "10.0.0.2"]
+  storage:
+    strict_file_permissions: true
+    dir_mode: "0710"
+    file_mode: "0640"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("VECTOR_DB_PORT", "30000")
 	t.Setenv("VECTOR_DB_API_KEY", "from-env")
+	t.Setenv("VECTOR_DB_SECURITY_API_KEY", "from-security-env")
 
 	cfg, err := Load(cfgPath)
 	if err != nil {
@@ -96,6 +120,21 @@ grpc:
 	}
 	if !cfg.Database.CacheEnabled || cfg.Database.CacheMaxBytes != 2048 || cfg.Database.CacheMaxItems != 321 || cfg.Database.CacheTTL != "30s" {
 		t.Fatal("expected cache config from yaml")
+	}
+	if cfg.Security.Profile != "production" || !cfg.Security.Auth.Enabled || !cfg.Security.Auth.GRPCEnabled {
+		t.Fatal("expected security config from yaml")
+	}
+	if cfg.Security.Auth.APIKey != "from-security-env" {
+		t.Fatal("expected security api key env override")
+	}
+	if !cfg.Security.Transport.TLSEnabled || cfg.Security.Transport.CertFile != "./cert.pem" || cfg.Security.Transport.KeyFile != "./key.pem" {
+		t.Fatal("expected tls config from yaml")
+	}
+	if !cfg.Security.Proxy.TrustForwardedFor || len(cfg.Security.Proxy.TrustedProxies) != 2 {
+		t.Fatal("expected proxy config from yaml")
+	}
+	if !cfg.Security.Storage.StrictFilePermissions || cfg.Security.Storage.DirMode != "0710" || cfg.Security.Storage.FileMode != "0640" {
+		t.Fatal("expected storage security config from yaml")
 	}
 }
 
@@ -157,6 +196,18 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	t.Setenv("VECTOR_DB_VECTOR_PATH", "/tmp/vectors")
 	t.Setenv("VECTOR_DB_GRPC_ENABLED", "true")
 	t.Setenv("VECTOR_DB_GRPC_PORT", "22000")
+	t.Setenv("VECTOR_DB_SECURITY_PROFILE", "production")
+	t.Setenv("VECTOR_DB_SECURITY_AUTH_ENABLED", "true")
+	t.Setenv("VECTOR_DB_SECURITY_API_KEY", "secret")
+	t.Setenv("VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED", "true")
+	t.Setenv("VECTOR_DB_TLS_ENABLED", "true")
+	t.Setenv("VECTOR_DB_TLS_CERT_FILE", "/tmp/cert.pem")
+	t.Setenv("VECTOR_DB_TLS_KEY_FILE", "/tmp/key.pem")
+	t.Setenv("VECTOR_DB_TRUST_FORWARDED_FOR", "true")
+	t.Setenv("VECTOR_DB_TRUSTED_PROXIES", "10.0.0.1,10.0.0.2")
+	t.Setenv("VECTOR_DB_STRICT_FILE_PERMISSIONS", "true")
+	t.Setenv("VECTOR_DB_STORAGE_DIR_MODE", "0700")
+	t.Setenv("VECTOR_DB_STORAGE_FILE_MODE", "0600")
 	overrideFromEnv(&cfg)
 
 	if cfg.Server.Protocol != "grpc" {
@@ -195,6 +246,18 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	if !cfg.GRPC.Enabled || cfg.GRPC.Port != "22000" {
 		t.Fatal("expected grpc overrides")
 	}
+	if cfg.Security.Profile != "production" || !cfg.Security.Auth.Enabled || cfg.Security.Auth.APIKey != "secret" || !cfg.Security.Auth.GRPCEnabled {
+		t.Fatal("expected security auth overrides")
+	}
+	if !cfg.Security.Transport.TLSEnabled || cfg.Security.Transport.CertFile != "/tmp/cert.pem" || cfg.Security.Transport.KeyFile != "/tmp/key.pem" {
+		t.Fatal("expected tls overrides")
+	}
+	if !cfg.Security.Proxy.TrustForwardedFor || len(cfg.Security.Proxy.TrustedProxies) != 2 {
+		t.Fatal("expected proxy overrides")
+	}
+	if !cfg.Security.Storage.StrictFilePermissions || cfg.Security.Storage.DirMode != "0700" || cfg.Security.Storage.FileMode != "0600" {
+		t.Fatal("expected storage overrides")
+	}
 }
 
 func TestInvalidProtocolFallsBackToHTTP(t *testing.T) {
@@ -230,5 +293,26 @@ search:
 	}
 	if cfg.Search.ANNM != 8 || cfg.Search.ANNEfConstruct != 32 || cfg.Search.ANNEfSearch != 40 {
 		t.Fatal("expected fast profile defaults with explicit ef_search override")
+	}
+}
+
+func TestSecurityProfileDefaults(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Security.Profile = "production"
+	applySecurityDefaults(&cfg)
+
+	if !cfg.Security.Storage.StrictFilePermissions {
+		t.Fatal("expected strict file permissions in production")
+	}
+	if cfg.Security.Storage.DirMode != "0700" || cfg.Security.Storage.FileMode != "0600" {
+		t.Fatal("expected strict production file modes")
+	}
+
+	cfg = defaultConfig()
+	cfg.Server.APIKey = "legacy-secret"
+	cfg.Security.Profile = "production"
+	applySecurityDefaults(&cfg)
+	if !cfg.Security.Auth.Enabled || !cfg.Security.Auth.GRPCEnabled || cfg.Security.Auth.APIKey != "legacy-secret" {
+		t.Fatal("expected legacy server api key to propagate into security auth")
 	}
 }

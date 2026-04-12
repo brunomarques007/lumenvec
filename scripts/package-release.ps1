@@ -11,7 +11,15 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = (Get-Content VERSION -Raw).Trim()
+    $latestTag = git describe --tags --match "v*" --abbrev=0 2>$null
+    if ($null -ne $latestTag) {
+        $latestTag = $latestTag.Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($latestTag)) {
+        $Version = "dev"
+    } else {
+        $Version = $latestTag
+    }
 }
 if ([string]::IsNullOrWhiteSpace($Goos)) {
     $Goos = (go env GOOS).Trim()
@@ -51,7 +59,7 @@ function Build-Bundle {
     Copy-Item $ConfigFile (Join-Path $bundleDir "config.yaml")
     Copy-Item README.md (Join-Path $bundleDir "README.md")
     Copy-Item LICENSE (Join-Path $bundleDir "LICENSE")
-    Copy-Item RELEASE.md (Join-Path $bundleDir "RELEASE.md")
+    Copy-Item CHANGELOG.md (Join-Path $bundleDir "CHANGELOG.md")
     @(
         "LumenVec release bundle"
         "Version: $Version"

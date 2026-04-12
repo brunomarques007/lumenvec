@@ -116,6 +116,24 @@ search:
 grpc:
   enabled: false
   port: 19191
+
+security:
+  profile: "development"
+  auth:
+    enabled: false
+    api_key: ""
+    grpc_enabled: false
+  transport:
+    tls_enabled: false
+    cert_file: ""
+    key_file: ""
+  proxy:
+    trust_forwarded_for: false
+    trusted_proxies: []
+  storage:
+    strict_file_permissions: false
+    dir_mode: "0755"
+    file_mode: "0644"
 ```
 
 Relevant fields:
@@ -145,6 +163,18 @@ Relevant fields:
 - `search.ann_eval_sample_rate`: percentage of ANN searches also checked against exact search for quality metrics
 - `grpc.port`: gRPC listener port
 - `grpc.enabled`: derived from `server.protocol` and kept for backward compatibility in config files
+- `security.profile`: `development` or `production`; applies security-oriented defaults without removing explicit overrides
+- `security.auth.enabled`: enables request authentication on HTTP data endpoints
+- `security.auth.api_key`: preferred API key location for authenticated deployments
+- `security.auth.grpc_enabled`: enables the same API key requirement on gRPC methods other than `Health`
+- `security.transport.tls_enabled`: enables TLS for HTTP and gRPC listeners
+- `security.transport.cert_file`: certificate file path used when TLS is enabled
+- `security.transport.key_file`: private key file path used when TLS is enabled
+- `security.proxy.trust_forwarded_for`: allows `X-Forwarded-For` only when the remote peer is trusted
+- `security.proxy.trusted_proxies`: list of trusted proxy IPs or CIDRs
+- `security.storage.strict_file_permissions`: enables tighter defaults for snapshot, WAL, and disk-store files
+- `security.storage.dir_mode`: octal directory mode used for persistence directories
+- `security.storage.file_mode`: octal file mode used for persistence files
 
 Environment variables override YAML:
 - `VECTOR_DB_PROTOCOL`
@@ -173,6 +203,18 @@ Environment variables override YAML:
 - `VECTOR_DB_ANN_EVAL_SAMPLE_RATE`
 - `VECTOR_DB_GRPC_PORT`
 - `VECTOR_DB_GRPC_ENABLED`
+- `VECTOR_DB_SECURITY_PROFILE`
+- `VECTOR_DB_SECURITY_AUTH_ENABLED`
+- `VECTOR_DB_SECURITY_API_KEY`
+- `VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED`
+- `VECTOR_DB_TLS_ENABLED`
+- `VECTOR_DB_TLS_CERT_FILE`
+- `VECTOR_DB_TLS_KEY_FILE`
+- `VECTOR_DB_TRUST_FORWARDED_FOR`
+- `VECTOR_DB_TRUSTED_PROXIES`
+- `VECTOR_DB_STRICT_FILE_PERMISSIONS`
+- `VECTOR_DB_STORAGE_DIR_MODE`
+- `VECTOR_DB_STORAGE_FILE_MODE`
 - `VECTOR_DB_CONFIG`
 
 PowerShell example:
@@ -226,13 +268,51 @@ For Docker usage, mounting `./data` as a volume is recommended.
 
 ## Security and Observability
 
-- If `server.api_key` is set, data endpoints require:
+- If `security.auth.enabled` is true and an API key is configured, HTTP data endpoints require:
 - `X-API-Key: <key>`
 - or `Authorization: Bearer <key>`
+- If `security.auth.grpc_enabled` is true, gRPC methods other than `Health` require the same API key via gRPC metadata
+- `server.api_key` remains supported as a compatibility fallback, but `security.auth.api_key` is the preferred field
+- TLS for HTTP and gRPC is opt-in through `security.transport.*`
+- `X-Forwarded-For` is ignored unless `security.proxy.trust_forwarded_for=true` and the remote peer matches `security.proxy.trusted_proxies`
+- persistence directories and files can be tightened with `security.storage.*`
 - `GET /health` and `GET /metrics` remain public
 - IP rate limiting uses `server.rate_limit_rps`
 - Prometheus metrics are exposed at `GET /metrics`
 - Core metrics include ANN counters, cache hit/miss/eviction/bytes tracking, and disk-store file/record/compaction tracking
+
+Recommended profiles:
+
+- `development`: no auth or TLS by default, relaxed file modes (`0755` directories, `0644` files)
+- `production`: enable auth, enable gRPC auth if using gRPC, enable TLS, configure trusted proxies explicitly, and use strict file permissions (`0700` directories, `0600` files)
+
+Minimal production example:
+
+```yaml
+server:
+  protocol: "http"
+  port: 19190
+  rate_limit_rps: 100
+
+security:
+  profile: "production"
+  auth:
+    enabled: true
+    api_key: "replace-me"
+    grpc_enabled: true
+  transport:
+    tls_enabled: true
+    cert_file: "/etc/lumenvec/tls/server.crt"
+    key_file: "/etc/lumenvec/tls/server.key"
+  proxy:
+    trust_forwarded_for: true
+    trusted_proxies:
+      - "10.0.0.0/24"
+  storage:
+    strict_file_permissions: true
+    dir_mode: "0700"
+    file_mode: "0600"
+```
 
 Important disk-store metrics:
 - `lumenvec_core_disk_file_bytes`
@@ -469,17 +549,20 @@ Release packaging:
 - PowerShell: `powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1`
 - Makefile: `make release-assets`
 - Output: transport-specific archives under `dist/release`, one `http` and one `grpc` package per supported OS
-- merges into `main` trigger the release workflow, which computes the next patch version from the latest tag, creates the new tag, and uploads the packaged assets automatically
+- bundles include `CHANGELOG.md` instead of static release-note snapshots
+- merges into `main` trigger the release workflow, which computes the next patch version from the latest tag, creates the new tag, updates the changelog through the promotion flow, and uploads the packaged assets automatically
+- release bump policy is label-driven on the PR to `main`: default `patch`, `release:minor` for minor releases, and `release:major` for major releases
 
 ## Release
 
 Recommended minimum release flow:
 1. run `go test ./...`
 2. open or update a `feature/*` branch and let CI promote it to a draft PR against `dev`
-3. merge validated changes into `dev`, then review the automated draft PR from `dev` to `main`
+3. merge validated changes into `dev`, then review the automated draft PR from `release/dev-to-main-vX.Y.Z` to `main`
 4. merge into `main` to trigger the GitHub release workflow
-5. let the workflow compute the next patch version and generate release notes from the commits since the previous tag
-6. publish the image to your target registry if you also distribute containers
+5. let the workflow compute the next patch version, update `CHANGELOG.md`, and generate release notes from the commits since the previous tag
+6. if needed, relabel the release PR with `release:minor` or `release:major` before merging
+7. publish the image to your target registry if you also distribute containers
 
 Docker Hub example:
 ```bash
@@ -490,7 +573,8 @@ docker push brunomarques007/lumenvec:latest
 Publication checklist:
 1. review the final public Docker image name
 2. confirm `LICENSE` matches the intended project license
-3. confirm the commit history between releases is ready to be turned into automated release notes
+3. confirm the commit history between releases is ready to be turned into automated release notes and changelog entries
+4. confirm the `main` release PR has the correct bump label: `release:patch`, `release:minor`, or `release:major`
 
 ## Delivery Pipeline
 
@@ -504,8 +588,9 @@ Workflow behavior:
 - pull requests targeting `dev` and `main` also run `.github/workflows/ci.yml`
 - successful CI runs on `feature/*` open or update a draft PR to `dev`
 - pushes to `dev` run `.github/workflows/release.yml`, which computes the next patch version from the latest tag, generates release notes from commit history, and builds the release bundles
-- successful runs of `.github/workflows/release.yml` on `dev` open or update a draft PR from `dev` to `main`
-- pushes to `main` run `.github/workflows/publish-release.yml`, which computes the next patch version, creates the git tag, and publishes the GitHub release with bundles rebuilt from `main`
+- successful runs of `.github/workflows/release.yml` on `dev` create or update a promotion branch `release/dev-to-main-vX.Y.Z`, update `CHANGELOG.md` there, and open a draft PR to `main`
+- the PR to `main` receives `release:patch` by default; switch it to `release:minor` or `release:major` when appropriate before merging
+- pushes to `main` run `.github/workflows/publish-release.yml`, which reads the merged PR labels, computes the final semantic version, creates the git tag, and publishes the GitHub release with bundles rebuilt from `main`
 - release asset names follow `lumenvec-vX.Y.Z-<os>-<arch>-<transport>.<ext>`
 
 Recommended repository settings:
@@ -594,7 +679,7 @@ Current architectural direction:
 ## Support Files
 
 - `CONTRIBUTING.md`: contribution flow and pre-PR checks
-- `CHANGELOG.md`: summary of notable changes
+- `CHANGELOG.md`: release history updated automatically by the promotion flow
 - `SECURITY.md`: lightweight disclosure and hardening guidance
 - `docs/roadmap.md`: execution backlog for cache, ANN refactor, and gRPC delivery
 - `docs/observability.md`: Prometheus queries, dashboard guidance, and ANN alerting notes

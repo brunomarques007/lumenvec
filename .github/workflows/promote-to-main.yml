@@ -6,7 +6,7 @@ on:
     types: [completed]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -19,23 +19,66 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Prepare changelog branch
+        id: release
+        shell: bash
+        run: |
+          eval "$(bash scripts/compute-next-version.sh patch)"
+          branch="release/dev-to-main-${version}"
+
+          mkdir -p dist/release
+          bash scripts/generate-release-notes.sh "$version" "$latest_tag" > dist/release/release-notes.md
+          bash scripts/update-changelog.sh "$version" dist/release/release-notes.md CHANGELOG.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git add CHANGELOG.md
+            git commit -m "docs(changelog): update for ${version}"
+            git push origin "HEAD:${branch}" --force
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "head=${branch}" >> "$GITHUB_OUTPUT"
+
       - name: Create or update PR to main
+        if: steps.release.outputs.changed == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const head = "dev";
+            const head = "${{ steps.release.outputs.head }}";
             const base = "main";
 
             const { owner, repo } = context.repo;
-            const prTitle = `Release ${head} to ${base}`;
+            const version = "${{ steps.release.outputs.version }}";
+            const prTitle = `Release ${version} to ${base}`;
             const prBody = [
               "## Automated release promotion",
               "",
-              `Source branch: \`${head}\``,
+              `Source branch: \`dev\``,
+              `Promotion branch: \`${head}\``,
               `Target branch: \`${base}\``,
               "",
-              "This draft PR was opened automatically after the release workflow completed successfully on `dev`."
+              `Release version: \`${version}\``,
+              "Default bump: `patch`",
+              "",
+              "Override labels:",
+              "- `release:minor` for a minor release",
+              "- `release:major` for a major release",
+              "",
+              "This draft PR was opened automatically after the release workflow completed successfully on `dev` and includes the generated changelog update."
             ].join("\n");
 
             const { data: existing } = await github.rest.pulls.list({
@@ -56,6 +99,20 @@ jobs:
                 body: prBody,
                 state: "open"
               });
+              const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
+                owner,
+                repo,
+                issue_number: existing[0].number
+              });
+              const labelNames = currentLabels.map((label) => label.name);
+              if (!labelNames.includes("release:patch") && !labelNames.includes("release:minor") && !labelNames.includes("release:major")) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: existing[0].number,
+                  labels: ["release:patch"]
+                });
+              }
               return;
             }
 
@@ -71,7 +128,7 @@ jobs:
               return;
             }
 
-            await github.rest.pulls.create({
+            const created = await github.rest.pulls.create({
               owner,
               repo,
               head,
@@ -79,4 +136,11 @@ jobs:
               title: prTitle,
               body: prBody,
               draft: true
+            });
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: created.data.number,
+              labels: ["release:patch"]
             });

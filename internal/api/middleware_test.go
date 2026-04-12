@@ -19,6 +19,7 @@ func newMiddlewareServer(t *testing.T, apiKey string) *Server {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 		APIKey:       apiKey,
+		AuthEnabled:  apiKey != "",
 		RateLimitRPS: 1,
 		SnapshotPath: filepath.Join(base, "snapshot.json"),
 		WALPath:      filepath.Join(base, "wal.log"),
@@ -30,6 +31,26 @@ func TestGetClientIP(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
 	if got := getClientIP(req); got != "1.2.3.4" {
 		t.Fatalf("getClientIP() = %q", got)
+	}
+}
+
+func TestTrustedProxyClientIP(t *testing.T) {
+	server := newMiddlewareServer(t, "")
+	server.trustXFF = true
+	server.trustedCIDRs = parseTrustedProxies([]string{"10.0.0.0/24"})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
+	if got := server.getClientIP(req); got != "1.2.3.4" {
+		t.Fatalf("expected trusted xff ip, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "9.9.9.9:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
+	if got := server.getClientIP(req); got != "9.9.9.9" {
+		t.Fatalf("expected remote addr fallback, got %q", got)
 	}
 }
 
@@ -54,6 +75,18 @@ func TestAuthMiddleware(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !nextCalled {
 		t.Fatal("expected authenticated request to pass")
+	}
+}
+
+func TestValidateAPIKey(t *testing.T) {
+	if !validateAPIKey("secret", "secret") {
+		t.Fatal("expected exact key match")
+	}
+	if validateAPIKey("secret", "other") {
+		t.Fatal("did not expect different keys to match")
+	}
+	if validateAPIKey("", "secret") {
+		t.Fatal("did not expect empty key to match")
 	}
 }
 

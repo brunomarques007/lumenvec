@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 
 	lumenvecpb "lumenvec/api/proto"
 	"lumenvec/internal/core"
@@ -11,6 +12,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -94,10 +97,18 @@ func (h *grpcHandler) DeleteVector(_ context.Context, req *lumenvecpb.DeleteVect
 	return &lumenvecpb.DeleteVectorResponse{Success: true}, nil
 }
 
-func (s *Server) grpcServer() *grpc.Server {
-	server := grpc.NewServer()
+func (s *Server) grpcServer() (*grpc.Server, error) {
+	options := []grpc.ServerOption{grpc.UnaryInterceptor(s.grpcAuthInterceptor())}
+	if s.tlsEnabled {
+		creds, err := credentials.NewServerTLSFromFile(s.tlsCertFile, s.tlsKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, grpc.Creds(creds))
+	}
+	server := grpc.NewServer(options...)
 	lumenvecpb.RegisterVectorServiceServer(server, &grpcHandler{service: s.service})
-	return server
+	return server, nil
 }
 
 func (s *Server) grpcListener() (net.Listener, error) {
@@ -105,7 +116,47 @@ func (s *Server) grpcListener() (net.Listener, error) {
 }
 
 func (s *Server) serveGRPC(listener net.Listener) error {
-	return grpcServeFunc(s.grpcServer(), listener)
+	server, err := s.grpcServer()
+	if err != nil {
+		return err
+	}
+	return grpcServeFunc(server, listener)
+}
+
+func (s *Server) grpcAuthInterceptor() grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		if !s.grpcAuth || !s.authEnabled || strings.TrimSpace(s.apiKey) == "" || info.FullMethod == "/lumenvec.VectorService/Health" {
+			return handler(ctx, req)
+		}
+
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			return nil, status.Error(codes.Unauthenticated, "missing credentials")
+		}
+		key := grpcAuthKeyFromMetadata(md)
+		if !validateAPIKey(key, s.apiKey) {
+			return nil, status.Error(codes.Unauthenticated, "unauthorized")
+		}
+		return handler(ctx, req)
+	}
+}
+
+func grpcAuthKeyFromMetadata(md metadata.MD) string {
+	if values := md.Get("x-api-key"); len(values) > 0 {
+		return strings.TrimSpace(values[0])
+	}
+	if values := md.Get("authorization"); len(values) > 0 {
+		auth := strings.TrimSpace(values[0])
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			return strings.TrimSpace(auth[7:])
+		}
+	}
+	return ""
 }
 
 func toProtoSearchResults(results []core.SearchResult) []*lumenvecpb.SearchResult {

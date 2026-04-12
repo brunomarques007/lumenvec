@@ -22,12 +22,18 @@ type PersistenceBackend interface {
 type snapshotWALBackend struct {
 	snapshotPath string
 	walPath      string
+	security     StorageSecurityOptions
 }
 
 func newSnapshotWALBackend(snapshotPath, walPath string) *snapshotWALBackend {
+	return newSnapshotWALBackendWithSecurity(snapshotPath, walPath, DefaultStorageSecurityOptions())
+}
+
+func newSnapshotWALBackendWithSecurity(snapshotPath, walPath string, security StorageSecurityOptions) *snapshotWALBackend {
 	return &snapshotWALBackend{
 		snapshotPath: snapshotPath,
 		walPath:      walPath,
+		security:     normalizeStorageSecurityOptions(security),
 	}
 }
 
@@ -37,7 +43,7 @@ func (b *snapshotWALBackend) SaveSnapshot(vectors []index.Vector) error {
 		payload[vec.ID] = append([]float64(nil), vec.Values...)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(b.snapshotPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(b.snapshotPath), b.security.DirMode); err != nil {
 		return err
 	}
 	tmp := b.snapshotPath + ".tmp"
@@ -45,7 +51,7 @@ func (b *snapshotWALBackend) SaveSnapshot(vectors []index.Vector) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, b.security.FileMode); err != nil {
 		return err
 	}
 	return os.Rename(tmp, b.snapshotPath)
@@ -68,10 +74,10 @@ func (b *snapshotWALBackend) LoadSnapshot() (map[string][]float64, error) {
 }
 
 func (b *snapshotWALBackend) AppendWAL(op walOp) error {
-	if err := os.MkdirAll(filepath.Dir(b.walPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(b.walPath), b.security.DirMode); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(b.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(b.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, b.security.FileMode)
 	if err != nil {
 		return err
 	}
@@ -115,8 +121,8 @@ func (b *snapshotWALBackend) ReplayWAL(apply func(walOp) error) error {
 }
 
 func (b *snapshotWALBackend) TruncateWAL() error {
-	if err := os.MkdirAll(filepath.Dir(b.walPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(b.walPath), b.security.DirMode); err != nil {
 		return err
 	}
-	return os.WriteFile(b.walPath, []byte{}, 0o644)
+	return os.WriteFile(b.walPath, []byte{}, b.security.FileMode)
 }

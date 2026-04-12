@@ -24,6 +24,7 @@ const (
 type fileVectorStore struct {
 	basePath string
 	dataPath string
+	security StorageSecurityOptions
 
 	mu       sync.RWMutex
 	file     *os.File
@@ -40,9 +41,14 @@ type fileVectorRecordMeta struct {
 }
 
 func newFileVectorStore(basePath string) *fileVectorStore {
+	return newFileVectorStoreWithSecurity(basePath, DefaultStorageSecurityOptions())
+}
+
+func newFileVectorStoreWithSecurity(basePath string, security StorageSecurityOptions) *fileVectorStore {
 	store := &fileVectorStore{
 		basePath: basePath,
 		dataPath: filepath.Join(basePath, fileVectorStoreDataFile),
+		security: normalizeStorageSecurityOptions(security),
 		offsets:  make(map[string]fileVectorRecordMeta),
 	}
 	if err := store.open(); err != nil {
@@ -204,10 +210,10 @@ func (s *fileVectorStore) open() error {
 }
 
 func (s *fileVectorStore) openLocked() error {
-	if err := os.MkdirAll(s.basePath, 0o755); err != nil {
+	if err := os.MkdirAll(s.basePath, s.security.DirMode); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(s.dataPath, os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(s.dataPath, os.O_CREATE|os.O_RDWR, s.security.FileMode)
 	if err != nil {
 		return err
 	}
@@ -255,7 +261,7 @@ func (s *fileVectorStore) compactLocked() error {
 	}
 
 	tmpPath := s.dataPath + ".compact"
-	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, s.security.FileMode)
 	if err != nil {
 		return err
 	}
@@ -298,7 +304,7 @@ func (s *fileVectorStore) compactLocked() error {
 		return err
 	}
 
-	file, err := os.OpenFile(s.dataPath, os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(s.dataPath, os.O_CREATE|os.O_RDWR, s.security.FileMode)
 	if err != nil {
 		return err
 	}

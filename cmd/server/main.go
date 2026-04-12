@@ -65,6 +65,18 @@ func buildServer(configPath string) (*api.Server, error) {
 		CacheTTL:          config.ParseDuration(cfg.Database.CacheTTL, 15*time.Minute),
 		GRPCEnabled:       cfg.GRPC.Enabled,
 		GRPCPort:          cfg.GRPC.Port,
+		SecurityProfile:   cfg.Security.Profile,
+		AuthEnabled:       cfg.Security.Auth.Enabled,
+		AuthAPIKey:        cfg.Security.Auth.APIKey,
+		GRPCAuthEnabled:   cfg.Security.Auth.GRPCEnabled,
+		TLSEnabled:        cfg.Security.Transport.TLSEnabled,
+		TLSCertFile:       cfg.Security.Transport.CertFile,
+		TLSKeyFile:        cfg.Security.Transport.KeyFile,
+		TrustForwardedFor: cfg.Security.Proxy.TrustForwardedFor,
+		TrustedProxies:    cfg.Security.Proxy.TrustedProxies,
+		StrictFilePerms:   cfg.Security.Storage.StrictFilePermissions,
+		StorageDirMode:    cfg.Security.Storage.DirMode,
+		StorageFileMode:   cfg.Security.Storage.FileMode,
 	})
 	return server, nil
 }

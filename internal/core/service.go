@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ type ServiceOptions struct {
 	VectorStore       string
 	VectorPath        string
 	Cache             CacheOptions
+	StorageSecurity   StorageSecurityOptions
 }
 
 type VectorIndex interface {
@@ -164,7 +166,7 @@ func NewServiceWithDeps(opts ServiceOptions, deps ServiceDeps) *Service {
 		deps.Index = index.NewIndex()
 	}
 	if deps.VectorStore == nil {
-		deps.VectorStore = newDefaultVectorStore(opts.VectorStore, opts.VectorPath)
+		deps.VectorStore = newDefaultVectorStore(opts.VectorStore, opts.VectorPath, opts.StorageSecurity)
 	}
 	deps.VectorStore = newCachedVectorStore(deps.VectorStore, opts.Cache)
 	if deps.ANNIndex == nil {
@@ -174,7 +176,7 @@ func NewServiceWithDeps(opts ServiceOptions, deps ServiceDeps) *Service {
 		deps.IDResolver = newMemoryIDResolver()
 	}
 	if deps.Persistence == nil {
-		deps.Persistence = newSnapshotWALBackend(opts.SnapshotPath, opts.WALPath)
+		deps.Persistence = newSnapshotWALBackendWithSecurity(opts.SnapshotPath, opts.WALPath, opts.StorageSecurity)
 	}
 
 	svc := &Service{
@@ -742,7 +744,7 @@ func (s *Service) addANNVector(internalID int, values []float64) error {
 func (s *Service) persistenceBackend() PersistenceBackend {
 	if backend, ok := s.persistence.(*snapshotWALBackend); ok {
 		if backend.snapshotPath != s.snapshotPath || backend.walPath != s.walPath {
-			s.persistence = newSnapshotWALBackend(s.snapshotPath, s.walPath)
+			s.persistence = newSnapshotWALBackendWithSecurity(s.snapshotPath, s.walPath, backend.security)
 		}
 	}
 	if s.persistence == nil {
@@ -756,16 +758,39 @@ func (s *Service) usesPersistentVectorStore() bool {
 	return ok && persistent.IsPersistent()
 }
 
-func newDefaultVectorStore(mode, path string) VectorStore {
+func newDefaultVectorStore(mode, path string, security ...StorageSecurityOptions) VectorStore {
+	storeSecurity := DefaultStorageSecurityOptions()
+	if len(security) > 0 {
+		storeSecurity = normalizeStorageSecurityOptions(security[0])
+	}
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "disk", "file":
 		if strings.TrimSpace(path) == "" {
 			path = "./data/vectors"
 		}
-		return newFileVectorStore(path)
+		return newFileVectorStoreWithSecurity(path, storeSecurity)
 	default:
 		return newMemoryVectorStore()
 	}
+}
+
+func storageSecurityOptionsFromStrings(strict bool, dirMode, fileMode string) StorageSecurityOptions {
+	opts := DefaultStorageSecurityOptions()
+	if strict {
+		opts = StrictStorageSecurityOptions()
+	}
+	opts.DirMode = ParseFileMode(dirMode, opts.DirMode)
+	opts.FileMode = ParseFileMode(fileMode, opts.FileMode)
+	opts.StrictFilePermissions = strict
+	return normalizeStorageSecurityOptions(opts)
+}
+
+func storagePathMode(path string) (os.FileMode, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Mode().Perm(), nil
 }
 
 func normalizeANNProfile(profile string) string {

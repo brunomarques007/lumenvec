@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"lumenvec/internal/index"
@@ -240,5 +241,34 @@ func TestFileVectorStoreOpenLockedFailure(t *testing.T) {
 	}
 	if err := store.open(); err == nil {
 		t.Fatal("expected open failure when base path is a file")
+	}
+}
+
+func TestFileVectorStoreUsesConfiguredPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not reliable on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "vectors")
+	store := newFileVectorStoreWithSecurity(path, StrictStorageSecurityOptions())
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.UpsertVector(index.Vector{ID: "doc-1", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+
+	dirMode, err := storagePathMode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirMode != 0o700 {
+		t.Fatalf("expected dir mode 0700, got %o", dirMode)
+	}
+
+	fileMode, err := storagePathMode(filepath.Join(path, fileVectorStoreDataFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileMode != 0o600 {
+		t.Fatalf("expected file mode 0600, got %o", fileMode)
 	}
 }

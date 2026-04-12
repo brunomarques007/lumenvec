@@ -157,10 +157,12 @@ func TestNewServerAndStart(t *testing.T) {
 	}
 
 	oldListen := listenAndServeFunc
+	oldListenTLS := listenAndServeTLSFunc
 	oldFatal := logFatalfAPI
 	oldPrintf := logPrintfAPI
 	t.Cleanup(func() {
 		listenAndServeFunc = oldListen
+		listenAndServeTLSFunc = oldListenTLS
 		logFatalfAPI = oldFatal
 		logPrintfAPI = oldPrintf
 	})
@@ -184,12 +186,14 @@ func TestServerStartWithGRPCEnabled(t *testing.T) {
 	server.grpcPort = ":19191"
 
 	oldListen := listenAndServeFunc
+	oldListenTLS := listenAndServeTLSFunc
 	oldFatal := logFatalfAPI
 	oldPrintf := logPrintfAPI
 	oldGRPCListen := grpcListenFunc
 	oldGRPCServe := grpcServeFunc
 	t.Cleanup(func() {
 		listenAndServeFunc = oldListen
+		listenAndServeTLSFunc = oldListenTLS
 		logFatalfAPI = oldFatal
 		logPrintfAPI = oldPrintf
 		grpcListenFunc = oldGRPCListen
@@ -229,11 +233,13 @@ func TestServerStartFailsWhenGRPCBindFails(t *testing.T) {
 	server.grpcEnabled = true
 
 	oldListen := listenAndServeFunc
+	oldListenTLS := listenAndServeTLSFunc
 	oldFatal := logFatalfAPI
 	oldPrintf := logPrintfAPI
 	oldGRPCListen := grpcListenFunc
 	t.Cleanup(func() {
 		listenAndServeFunc = oldListen
+		listenAndServeTLSFunc = oldListenTLS
 		logFatalfAPI = oldFatal
 		logPrintfAPI = oldPrintf
 		grpcListenFunc = oldGRPCListen
@@ -247,6 +253,37 @@ func TestServerStartFailsWhenGRPCBindFails(t *testing.T) {
 	server.Start()
 	if !fatalCalled {
 		t.Fatal("expected grpc bind failure to trigger fatal path")
+	}
+}
+
+func TestServerStartWithHTTPSTLS(t *testing.T) {
+	server := newAPITestServer(t)
+	server.tlsEnabled = true
+	server.tlsCertFile = "cert.pem"
+	server.tlsKeyFile = "key.pem"
+
+	oldListen := listenAndServeFunc
+	oldListenTLS := listenAndServeTLSFunc
+	oldFatal := logFatalfAPI
+	oldPrintf := logPrintfAPI
+	t.Cleanup(func() {
+		listenAndServeFunc = oldListen
+		listenAndServeTLSFunc = oldListenTLS
+		logFatalfAPI = oldFatal
+		logPrintfAPI = oldPrintf
+	})
+
+	var tlsCalled bool
+	logPrintfAPI = func(string, ...interface{}) {}
+	logFatalfAPI = func(string, ...interface{}) {}
+	listenAndServeTLSFunc = func(*http.Server, string, string) error {
+		tlsCalled = true
+		return nil
+	}
+
+	server.Start()
+	if !tlsCalled {
+		t.Fatal("expected https start path")
 	}
 }
 

@@ -46,6 +46,28 @@ type Config struct {
 		Enabled bool   `yaml:"enabled"`
 		Port    string `yaml:"port"`
 	} `yaml:"grpc"`
+	Security struct {
+		Profile string `yaml:"profile"`
+		Auth    struct {
+			Enabled     bool   `yaml:"enabled"`
+			APIKey      string `yaml:"api_key"`
+			GRPCEnabled bool   `yaml:"grpc_enabled"`
+		} `yaml:"auth"`
+		Transport struct {
+			TLSEnabled bool   `yaml:"tls_enabled"`
+			CertFile   string `yaml:"cert_file"`
+			KeyFile    string `yaml:"key_file"`
+		} `yaml:"transport"`
+		Proxy struct {
+			TrustForwardedFor bool     `yaml:"trust_forwarded_for"`
+			TrustedProxies    []string `yaml:"trusted_proxies"`
+		} `yaml:"proxy"`
+		Storage struct {
+			StrictFilePermissions bool   `yaml:"strict_file_permissions"`
+			DirMode               string `yaml:"dir_mode"`
+			FileMode              string `yaml:"file_mode"`
+		} `yaml:"storage"`
+	} `yaml:"security"`
 }
 
 func Load(path string) (Config, error) {
@@ -99,6 +121,18 @@ func defaultConfig() Config {
 	cfg.Search.ANNEvalSampleRate = 0
 	cfg.GRPC.Enabled = false
 	cfg.GRPC.Port = "19191"
+	cfg.Security.Profile = "development"
+	cfg.Security.Auth.Enabled = false
+	cfg.Security.Auth.APIKey = ""
+	cfg.Security.Auth.GRPCEnabled = false
+	cfg.Security.Transport.TLSEnabled = false
+	cfg.Security.Transport.CertFile = ""
+	cfg.Security.Transport.KeyFile = ""
+	cfg.Security.Proxy.TrustForwardedFor = false
+	cfg.Security.Proxy.TrustedProxies = nil
+	cfg.Security.Storage.StrictFilePermissions = false
+	cfg.Security.Storage.DirMode = "0755"
+	cfg.Security.Storage.FileMode = "0644"
 	return cfg
 }
 
@@ -207,8 +241,62 @@ func overrideFromEnv(cfg *Config) {
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_GRPC_PORT")); v != "" {
 		cfg.GRPC.Port = v
 	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_SECURITY_PROFILE")); v != "" {
+		cfg.Security.Profile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_SECURITY_AUTH_ENABLED")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Security.Auth.Enabled = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_SECURITY_API_KEY")); v != "" {
+		cfg.Security.Auth.APIKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Security.Auth.GRPCEnabled = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_TLS_ENABLED")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Security.Transport.TLSEnabled = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_TLS_CERT_FILE")); v != "" {
+		cfg.Security.Transport.CertFile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_TLS_KEY_FILE")); v != "" {
+		cfg.Security.Transport.KeyFile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_TRUST_FORWARDED_FOR")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Security.Proxy.TrustForwardedFor = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_TRUSTED_PROXIES")); v != "" {
+		parts := strings.Split(v, ",")
+		cfg.Security.Proxy.TrustedProxies = cfg.Security.Proxy.TrustedProxies[:0]
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				cfg.Security.Proxy.TrustedProxies = append(cfg.Security.Proxy.TrustedProxies, part)
+			}
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_STRICT_FILE_PERMISSIONS")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Security.Storage.StrictFilePermissions = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_STORAGE_DIR_MODE")); v != "" {
+		cfg.Security.Storage.DirMode = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_STORAGE_FILE_MODE")); v != "" {
+		cfg.Security.Storage.FileMode = v
+	}
 	applyTransportDefaults(cfg)
 	applyANNProfileDefaults(cfg)
+	applySecurityDefaults(cfg)
 }
 
 func applyTransportDefaults(cfg *Config) {
@@ -238,6 +326,50 @@ func applyANNProfileDefaults(cfg *Config) {
 	}
 	if cfg.Search.ANNEfSearch <= 0 {
 		cfg.Search.ANNEfSearch = efSearch
+	}
+}
+
+func applySecurityDefaults(cfg *Config) {
+	profile := normalizeSecurityProfile(cfg.Security.Profile)
+	cfg.Security.Profile = profile
+
+	if strings.TrimSpace(cfg.Security.Auth.APIKey) == "" && strings.TrimSpace(cfg.Server.APIKey) != "" {
+		cfg.Security.Auth.APIKey = cfg.Server.APIKey
+	}
+
+	switch profile {
+	case "production":
+		if strings.TrimSpace(cfg.Security.Auth.APIKey) != "" {
+			cfg.Security.Auth.Enabled = true
+		}
+		cfg.Security.Auth.GRPCEnabled = cfg.Security.Auth.Enabled
+		cfg.Security.Proxy.TrustForwardedFor = cfg.Security.Proxy.TrustForwardedFor && len(cfg.Security.Proxy.TrustedProxies) > 0
+		cfg.Security.Storage.StrictFilePermissions = true
+		if strings.TrimSpace(cfg.Security.Storage.DirMode) == "" || cfg.Security.Storage.DirMode == "0755" {
+			cfg.Security.Storage.DirMode = "0700"
+		}
+		if strings.TrimSpace(cfg.Security.Storage.FileMode) == "" || cfg.Security.Storage.FileMode == "0644" {
+			cfg.Security.Storage.FileMode = "0600"
+		}
+	default:
+		if !cfg.Security.Auth.Enabled {
+			cfg.Security.Auth.GRPCEnabled = false
+		}
+		if strings.TrimSpace(cfg.Security.Storage.DirMode) == "" {
+			cfg.Security.Storage.DirMode = "0755"
+		}
+		if strings.TrimSpace(cfg.Security.Storage.FileMode) == "" {
+			cfg.Security.Storage.FileMode = "0644"
+		}
+	}
+}
+
+func normalizeSecurityProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "production":
+		return "production"
+	default:
+		return "development"
 	}
 }
 
