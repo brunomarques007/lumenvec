@@ -14,6 +14,7 @@ jobs:
 
     outputs:
       version: ${{ steps.version.outputs.value }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
 
     steps:
       - name: Checkout
@@ -21,16 +22,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Read version
+      - name: Compute next version
         id: version
         shell: bash
         run: |
-          version="$(tr -d '\r\n' < VERSION)"
-          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "VERSION must match vMAJOR.MINOR.PATCH" >&2
+          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
+          if [[ -z "$latest_tag" ]]; then
+            latest_tag="v0.0.0"
+          fi
+
+          if [[ ! "$latest_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Latest tag $latest_tag does not match vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          version="v${major}.${minor}.$((patch + 1))"
+
           echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$latest_tag" >> "$GITHUB_OUTPUT"
 
       - name: Ensure tag does not already exist
         shell: bash
@@ -99,15 +111,18 @@ jobs:
         shell: bash
         run: |
           tag="${{ needs.prepare-release.outputs.version }}"
-          awk -v tag="$tag" '
-            $0 == "## " tag { printing=1; next }
-            printing && /^## / { exit }
-            printing { print }
-          ' RELEASE.md > dist/release/release-notes.md
+          previous="${{ needs.prepare-release.outputs.previous_tag }}"
+          {
+            echo "## ${tag}"
+            echo
+            echo "Automated release from \`${previous}\` to \`${tag}\`."
+            echo
+            echo "### Commits"
+            git log --no-merges --pretty='- %s (%h)' "${previous}..HEAD"
+          } > dist/release/release-notes.md
 
-          if [[ ! -s dist/release/release-notes.md ]]; then
-            echo "Release notes section for $tag not found in RELEASE.md" >&2
-            exit 1
+          if ! grep -q '^-' dist/release/release-notes.md; then
+            echo "- No user-facing commits since ${previous}" >> dist/release/release-notes.md
           fi
 
       - name: Create git tag
