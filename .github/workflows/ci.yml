@@ -74,11 +74,17 @@ jobs:
           load: true
           tags: lumenvec:ci
 
-      - name: Run Trivy image scan
-        uses: aquasecurity/trivy-action@0.24.0
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
         with:
-          image-ref: lumenvec:ci
-          format: table
-          exit-code: 1
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH
+          version: v0.68.1
+          cache: true
+
+      - name: Run Trivy image scan
+        run: >
+          trivy image
+          --format table
+          --exit-code 1
+          --ignore-unfixed
+          --severity CRITICAL,HIGH
+          lumenvec:ci
