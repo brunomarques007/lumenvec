@@ -31,6 +31,15 @@ func (h *grpcHandler) Health(context.Context, *lumenvecpb.HealthRequest) (*lumen
 	return &lumenvecpb.HealthResponse{Status: "ok"}, nil
 }
 
+func (h *grpcHandler) ListVectors(context.Context, *lumenvecpb.ListVectorsRequest) (*lumenvecpb.ListVectorsResponse, error) {
+	vecs := h.service.ListVectors()
+	out := make([]*lumenvecpb.Vector, 0, len(vecs))
+	for _, vec := range vecs {
+		out = append(out, &lumenvecpb.Vector{Id: vec.ID, Values: vec.Values})
+	}
+	return &lumenvecpb.ListVectorsResponse{Vectors: out}, nil
+}
+
 func (h *grpcHandler) AddVector(_ context.Context, req *lumenvecpb.AddVectorRequest) (*lumenvecpb.AddVectorResponse, error) {
 	if err := h.service.AddVector(req.GetId(), req.GetValues()); err != nil {
 		return nil, grpcStatusFromError(err)

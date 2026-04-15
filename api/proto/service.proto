@@ -6,6 +6,7 @@ option go_package = "lumenvec/api/proto;lumenvecpb";
 
 service VectorService {
   rpc Health(HealthRequest) returns (HealthResponse);
+  rpc ListVectors(ListVectorsRequest) returns (ListVectorsResponse);
   rpc AddVector(AddVectorRequest) returns (AddVectorResponse);
   rpc AddVectorsBatch(AddVectorsBatchRequest) returns (AddVectorsBatchResponse);
   rpc GetVector(GetVectorRequest) returns (GetVectorResponse);
@@ -18,6 +19,12 @@ message HealthRequest {}
 
 message HealthResponse {
   string status = 1;
+}
+
+message ListVectorsRequest {}
+
+message ListVectorsResponse {
+  repeated Vector vectors = 1;
 }
 
 message Vector {

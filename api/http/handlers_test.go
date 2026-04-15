@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -48,6 +49,24 @@ func TestHandlerWrappers(t *testing.T) {
 	handlers.AddVector(create, createReq)
 	if create.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", create.Code)
+	}
+
+	list := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/vectors", nil)
+	handlers.ListVectors(list, listReq)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", list.Code)
+	}
+	var payload struct {
+		Vectors []struct {
+			ID string `json:"id"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(payload.Vectors) != 1 || payload.Vectors[0].ID != "a" {
+		t.Fatalf("unexpected list: %+v", payload)
 	}
 
 	search := httptest.NewRecorder()

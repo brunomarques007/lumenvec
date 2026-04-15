@@ -79,6 +79,10 @@ type batchSearchRequest struct {
 	Queries []batchSearchQuery `json:"queries"`
 }
 
+type listVectorsResponse struct {
+	Vectors []vectorPayload `json:"vectors"`
+}
+
 type ServerOptions struct {
 	Protocol          string
 	Port              string
@@ -376,6 +380,7 @@ func (s *Server) routes() {
 
 	s.router.HandleFunc("/health", s.HealthHandler).Methods(http.MethodGet)
 	s.router.Handle("/metrics", promhttp.HandlerFor(s.metricsRegistry, promhttp.HandlerOpts{})).Methods(http.MethodGet)
+	s.router.HandleFunc("/vectors", s.ListVectorsHandler).Methods(http.MethodGet)
 	s.router.HandleFunc("/vectors", s.AddVectorHandler).Methods(http.MethodPost)
 	s.router.HandleFunc("/vectors/batch", s.AddVectorsBatchHandler).Methods(http.MethodPost)
 	s.router.HandleFunc("/vectors/search", s.SearchVectorsHandler).Methods(http.MethodPost)
@@ -393,11 +398,18 @@ func (s *Server) HealthHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func (s *Server) ListVectorsHandler(w http.ResponseWriter, _ *http.Request) {
+	vecs := s.service.ListVectors()
+	out := make([]vectorPayload, 0, len(vecs))
+	for _, vec := range vecs {
+		out = append(out, vectorPayload{ID: vec.ID, Values: vec.Values})
+	}
+	writeJSON(w, 0, listVectorsResponse{Vectors: out})
+}
+
 func (s *Server) AddVectorHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var payload vectorPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &payload) {
 		return
 	}
 	if payload.ID == "" {
@@ -416,10 +428,8 @@ func (s *Server) AddVectorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) AddVectorsBatchHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var req batchVectorsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &req) {
 		return
 	}
 	vectors := make([]index.Vector, 0, len(req.Vectors))
@@ -449,8 +459,7 @@ func (s *Server) GetVectorHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(vectorPayload{ID: vec.ID, Values: vec.Values})
+	writeJSON(w, 0, vectorPayload{ID: vec.ID, Values: vec.Values})
 }
 
 func (s *Server) DeleteVectorHandler(w http.ResponseWriter, r *http.Request) {
@@ -467,10 +476,8 @@ func (s *Server) DeleteVectorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) SearchVectorsHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var req searchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &req) {
 		return
 	}
 	results, err := s.service.Search(req.Values, req.K)
@@ -478,16 +485,12 @@ func (s *Server) SearchVectorsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), statusFromServiceError(err))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(results)
+	writeJSON(w, 0, results)
 }
 
 func (s *Server) SearchVectorsBatchHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var req batchSearchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &req) {
 		return
 	}
 	queries := make([]core.BatchSearchQuery, 0, len(req.Queries))
@@ -499,9 +502,7 @@ func (s *Server) SearchVectorsBatchHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), statusFromServiceError(err))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(results)
+	writeJSON(w, 0, results)
 }
 
 func (s *Server) Start() {
@@ -540,6 +541,25 @@ func (s *Server) httpServer() *http.Server {
 		ReadTimeout:  s.readTimeout,
 		WriteTimeout: s.writeTimeout,
 	}
+}
+
+const contentTypeJSON = "application/json"
+
+func (s *Server) readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", contentTypeJSON)
+	if status != 0 {
+		w.WriteHeader(status)
+	}
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func statusFromServiceError(err error) int {
