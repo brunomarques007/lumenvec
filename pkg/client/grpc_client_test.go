@@ -24,6 +24,15 @@ func (s *testVectorService) Health(context.Context, *lumenvecpb.HealthRequest) (
 	return &lumenvecpb.HealthResponse{Status: "ok"}, nil
 }
 
+func (s *testVectorService) ListVectors(context.Context, *lumenvecpb.ListVectorsRequest) (*lumenvecpb.ListVectorsResponse, error) {
+	vecs := s.service.ListVectors()
+	out := make([]*lumenvecpb.Vector, 0, len(vecs))
+	for _, vec := range vecs {
+		out = append(out, &lumenvecpb.Vector{Id: vec.ID, Values: vec.Values})
+	}
+	return &lumenvecpb.ListVectorsResponse{Vectors: out}, nil
+}
+
 func (s *testVectorService) AddVector(_ context.Context, req *lumenvecpb.AddVectorRequest) (*lumenvecpb.AddVectorResponse, error) {
 	if err := s.service.AddVector(req.GetId(), req.GetValues()); err != nil {
 		return nil, err

@@ -20,15 +20,21 @@ func NewHandlers(api *api.Server) *Handlers {
 // RegisterRoutes registers the HTTP routes
 func (h *Handlers) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/health", h.Health).Methods(http.MethodGet)
-	r.HandleFunc("/vectors", h.AddVector).Methods("POST")
-	r.HandleFunc("/vectors/search", h.SearchVectors).Methods("POST")
-	r.HandleFunc("/vectors/{id}", h.GetVector).Methods("GET")
-	r.HandleFunc("/vectors/{id}", h.DeleteVector).Methods("DELETE")
+	r.HandleFunc("/vectors", h.ListVectors).Methods(http.MethodGet)
+	r.HandleFunc("/vectors", h.AddVector).Methods(http.MethodPost)
+	r.HandleFunc("/vectors/search", h.SearchVectors).Methods(http.MethodPost)
+	r.HandleFunc("/vectors/{id}", h.GetVector).Methods(http.MethodGet)
+	r.HandleFunc("/vectors/{id}", h.DeleteVector).Methods(http.MethodDelete)
 }
 
 // Health returns API health status.
 func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
 	h.API.HealthHandler(w, r)
+}
+
+// ListVectors returns all stored vectors.
+func (h *Handlers) ListVectors(w http.ResponseWriter, r *http.Request) {
+	h.API.ListVectorsHandler(w, r)
 }
 
 // AddVector handles adding a new vector

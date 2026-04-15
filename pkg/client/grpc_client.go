@@ -72,6 +72,26 @@ func (c *GRPCVectorClient) AddVectors(vectors []VectorPayload) error {
 	return err
 }
 
+func (c *GRPCVectorClient) ListVectors() ([]VectorPayload, error) {
+	ctx, cancel := c.context()
+	defer cancel()
+	resp, err := c.client.ListVectors(ctx, &lumenvecpb.ListVectorsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VectorPayload, 0, len(resp.GetVectors()))
+	for _, vec := range resp.GetVectors() {
+		if vec == nil {
+			continue
+		}
+		out = append(out, VectorPayload{
+			ID:     vec.GetId(),
+			Values: vec.GetValues(),
+		})
+	}
+	return out, nil
+}
+
 func (c *GRPCVectorClient) GetVector(id string) (*VectorPayload, error) {
 	ctx, cancel := c.context()
 	defer cancel()

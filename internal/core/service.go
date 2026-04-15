@@ -227,13 +227,13 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 			s.rollbackAddedVectors(addedIDs)
 			return fmt.Errorf("%w (%d)", ErrVectorDimTooHigh, s.maxVectorDim)
 		}
-		if err := s.vectorStore.UpsertVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
+		// Index first so duplicate IDs return conflict without mutating the vector store.
+		if err := s.index.AddVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
 			s.rollbackAddedVectors(addedIDs)
 			return err
 		}
-
-		if err := s.index.AddVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
-			_ = s.vectorStore.DeleteVector(vec.ID)
+		if err := s.vectorStore.UpsertVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
+			_ = s.index.DeleteVector(vec.ID)
 			s.rollbackAddedVectors(addedIDs)
 			return err
 		}
@@ -262,6 +262,13 @@ func (s *Service) GetVector(id string) (index.Vector, error) {
 		return index.Vector{}, ErrInvalidID
 	}
 	return s.vectorStore.GetVector(id)
+}
+
+func (s *Service) ListVectors() []index.Vector {
+	s.ensureRuntimeDeps()
+	vecs := s.vectorStore.ListVectors()
+	sort.Slice(vecs, func(i, j int) bool { return vecs[i].ID < vecs[j].ID })
+	return vecs
 }
 
 func (s *Service) DeleteVector(id string) error {

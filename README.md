@@ -386,6 +386,24 @@ Responses:
 - `400 Bad Request`
 - `409 Conflict`
 
+### Get a list of vectors
+`GET /vectors`
+
+Example:
+```bash
+curl http://localhost:19190/vectors
+```
+
+Response:
+```json
+{
+  "vectors": [
+    {"id": "doc-1", "values": [1.0, 2.0, 3.0]},
+    {"id": "doc-2", "values": [4.0, 5.0, 6.0]}
+  ]
+}
+```
+
 ### Get a vector by ID
 `GET /vectors/{id}`
 
@@ -473,6 +491,7 @@ gRPC client:
 Current capabilities:
 - `AddVectorWithID`
 - `AddVectors`
+- `ListVectors`
 - `GetVector`
 - `SearchVector`
 - `SearchVectors`
@@ -500,6 +519,7 @@ err = grpcClient.AddVectorWithID("doc-1", []float64{1, 2, 3})
 
 Implemented RPCs:
 - `Health`
+- `ListVectors`
 - `AddVector`
 - `AddVectorsBatch`
 - `GetVector`
