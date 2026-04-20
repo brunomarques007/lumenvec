@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	lumenvecpb "lumenvec/api/proto"
@@ -138,6 +139,10 @@ func TestGRPCVectorClientLifecycle(t *testing.T) {
 	}
 	if err := client.AddVectorWithID("doc-1", []float64{1, 2, 3}); err != nil {
 		t.Fatal(err)
+	}
+	vecs, err := client.ListVectors()
+	if err != nil || len(vecs) != 1 || vecs[0].ID != "doc-1" || !reflect.DeepEqual(vecs[0].Values, []float64{1, 2, 3}) {
+		t.Fatal("expected grpc list vectors")
 	}
 	vec, err := client.GetVector("doc-1")
 	if err != nil || vec == nil || vec.ID != "doc-1" {
