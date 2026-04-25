@@ -5,10 +5,12 @@
 
 LumenVec is a vector database written in Go, built for simple deployment, batch-oriented search workloads, and iterative performance tuning across HTTP and gRPC.
 
-It currently provides a Go-native core with local persistence, a configurable in-memory hot-vector cache, `exact` and `ann` search modes, Prometheus metrics, exclusive HTTP or gRPC transport selection per process, and Docker-ready packaging.
+It currently provides a Go-native core with local persistence, a configurable in-memory hot-vector cache, `exact` and `ann` search modes, Prometheus metrics, exclusive HTTP or gRPC transport selection per process, and Docker-ready packaging. HTTP remains the default connection mode; gRPC is available as the lower-overhead option for higher-throughput and lower-latency workloads.
 
 ## Highlights
 - HTTP and gRPC APIs for `upsert`, `get`, `delete`, `search`, and batch operations
+- HTTP is the default connection mode for general integrations and operational simplicity
+- gRPC is the recommended option for latency-sensitive and high-throughput workloads
 - explicit transport selection so one process runs either HTTP or gRPC, not both
 - Go-native core extracted from the transport layer
 - Local persistence through `snapshot + WAL` or disk-backed payload files
@@ -40,6 +42,10 @@ Default server:
 - Health: `http://localhost:19190/health`
 - Metrics: `http://localhost:19190/metrics`
 - gRPC: `localhost:19191` when `server.protocol=grpc`
+
+Transport guidance:
+- use HTTP as the default integration path
+- use gRPC when transport overhead matters more than broad compatibility
 
 ### Run with the helper script
 ```bash
@@ -97,6 +103,7 @@ database:
   snapshot_every: 25
   vector_store: "memory"
   vector_path: "./data/vectors"
+  sync_every: 1
   cache_enabled: false
   cache_max_bytes: 8388608
   cache_max_items: 1024
@@ -139,7 +146,7 @@ security:
 ```
 
 Relevant fields:
-- `server.protocol`: `http` or `grpc`; exactly one transport runs per process
+- `server.protocol`: `http` or `grpc`; exactly one transport runs per process, with `http` as the default mode
 - `server.port`: HTTP service port
 - `server.read_timeout`: HTTP read timeout
 - `server.write_timeout`: HTTP write timeout
@@ -150,6 +157,7 @@ Relevant fields:
 - `database.snapshot_every`: number of operations before snapshot consolidation
 - `database.vector_store`: payload backend, currently `memory` or `disk`
 - `database.vector_path`: directory used by the disk-backed payload store
+- `database.sync_every`: durability group-commit interval; `1` syncs every write batch, higher values reduce fsync frequency
 - `database.cache_enabled`: enables the in-memory vector cache
 - `database.cache_max_bytes`: primary cache capacity limit
 - `database.cache_max_items`: secondary cache capacity limit
@@ -190,6 +198,7 @@ Environment variables override YAML:
 - `VECTOR_DB_SNAPSHOT_EVERY`
 - `VECTOR_DB_VECTOR_STORE`
 - `VECTOR_DB_VECTOR_PATH`
+- `VECTOR_DB_SYNC_EVERY`
 - `VECTOR_DB_CACHE_ENABLED`
 - `VECTOR_DB_CACHE_MAX_BYTES`
 - `VECTOR_DB_CACHE_MAX_ITEMS`
@@ -391,7 +400,7 @@ Responses:
 
 Example:
 ```bash
-curl http://localhost:19190/vectors
+curl "http://localhost:19190/vectors?limit=100"
 ```
 
 Response:
@@ -400,9 +409,16 @@ Response:
   "vectors": [
     {"id": "doc-1", "values": [1.0, 2.0, 3.0]},
     {"id": "doc-2", "values": [4.0, 5.0, 6.0]}
-  ]
+  ],
+  "next_cursor": "ZG9jLTI"
 }
 ```
+
+Query parameters:
+- `limit`: maximum number of vectors to return. Defaults to `100` and is capped at `1000`.
+- `cursor`: opaque cursor from `next_cursor`, used to fetch the next page.
+- `after`: raw vector ID cursor, kept for compatibility with older callers.
+- `ids_only`: when `true`, returns only vector IDs and omits values.
 
 ### Get a vector by ID
 `GET /vectors/{id}`
@@ -527,6 +543,8 @@ Implemented RPCs:
 - `SearchBatch`
 - `DeleteVector`
 
+`ListVectors` supports bounded pagination with `limit`, `cursor`, `ids_only`, and `next_cursor`. `limit` defaults to `100` and is capped at `1000`; callers should pass `next_cursor` into the next request's `cursor` field until it is empty.
+
 The protobuf definition is in `api/proto/service.proto`.
 
 ## Docker and Compose
@@ -561,6 +579,7 @@ Useful container env vars:
 - `VECTOR_DB_TLS_KEY_FILE`
 - `VECTOR_DB_TRUST_FORWARDED_FOR=true|false`
 - `VECTOR_DB_TRUSTED_PROXIES=10.0.0.0/24,10.0.1.10`
+- `VECTOR_DB_SYNC_EVERY`
 - `VECTOR_DB_STRICT_FILE_PERMISSIONS=true|false`
 - `VECTOR_DB_STORAGE_DIR_MODE`
 - `VECTOR_DB_STORAGE_FILE_MODE`
@@ -736,7 +755,7 @@ lumenvec/
 The project currently exposes HTTP or gRPC over the same Go-native core service, with one transport selected per process.
 
 Current architectural direction:
-- keep HTTP as the simple public interface
+- keep HTTP as the default public interface
 - use gRPC in a dedicated process for higher-throughput internal and batch-oriented workloads
 - continue evolving the hot-vector cache and ANN path for lower latency
 

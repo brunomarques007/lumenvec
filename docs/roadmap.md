@@ -6,7 +6,7 @@ This roadmap turns the planned improvements for LumenVec into an execution backl
 
 - reduce search-path overhead in the current core
 - prepare the storage model for hot/cold data management with memory cache
-- add gRPC as a higher-throughput transport without splitting business logic
+- keep HTTP as the default transport while adding and tuning gRPC as a higher-throughput option without splitting business logic
 
 ## Current State
 
@@ -26,6 +26,7 @@ That means memory cache should not be the first change. The first step is to rem
 - memory should hold the working set, not an uncontrolled duplicate of all data
 - cache lookup should be `memory first`, then `store fallback`; not simultaneous reads
 - HTTP and gRPC must reuse the same core service
+- HTTP should remain the default public transport unless there is an explicit product decision to change it
 - all performance work must be measured with benchmarks and exposed through metrics
 
 ## Delivery Phases
