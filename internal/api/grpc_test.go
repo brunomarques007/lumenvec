@@ -203,8 +203,19 @@ func TestGRPCBatchAndErrorMappings(t *testing.T) {
 	if _, err := handler.AddVector(context.Background(), &lumenvecpb.AddVectorRequest{}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("expected invalid argument, got %v", err)
 	}
+	if _, err := handler.AddVectorsBatch(context.Background(), &lumenvecpb.AddVectorsBatchRequest{
+		Vectors: []*lumenvecpb.Vector{nil, {Id: "bad", Values: nil}},
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid batch argument, got %v", err)
+	}
 	if _, err := handler.GetVector(context.Background(), &lumenvecpb.GetVectorRequest{Id: "missing"}); status.Code(err) != codes.NotFound {
 		t.Fatalf("expected not found, got %v", err)
+	}
+	if _, err := handler.Search(context.Background(), &lumenvecpb.SearchRequest{Values: nil, TopK: 1}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid search argument, got %v", err)
+	}
+	if _, err := handler.SearchBatch(context.Background(), &lumenvecpb.SearchBatchRequest{Queries: []*lumenvecpb.SearchBatchQuery{{Id: "bad", Values: nil, TopK: 1}}}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid batch search argument, got %v", err)
 	}
 	if _, err := handler.DeleteVector(context.Background(), &lumenvecpb.DeleteVectorRequest{Id: "missing"}); status.Code(err) != codes.NotFound {
 		t.Fatalf("expected not found, got %v", err)
@@ -279,6 +290,9 @@ func TestGRPCListVectorsPagination(t *testing.T) {
 	if _, err := handler.ListVectors(context.Background(), &lumenvecpb.ListVectorsRequest{Limit: -1}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("negative limit code = %v, want invalid argument", status.Code(err))
 	}
+	if _, err := handler.ListVectors(context.Background(), &lumenvecpb.ListVectorsRequest{Limit: maxListVectorsLimit + 1}); err != nil {
+		t.Fatalf("large limit should be capped, got %v", err)
+	}
 	if _, err := handler.ListVectors(context.Background(), &lumenvecpb.ListVectorsRequest{Cursor: "!"}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("bad cursor code = %v, want invalid argument", status.Code(err))
 	}
@@ -351,6 +365,18 @@ func TestGRPCServerTLSConfigError(t *testing.T) {
 	})
 	if _, err := server.grpcServer(); err == nil {
 		t.Fatal("expected grpcServer to fail with missing TLS files")
+	}
+}
+
+func TestServeGRPCPropagatesServerBuildError(t *testing.T) {
+	server := NewServerWithOptions(ServerOptions{
+		Port:        ":0",
+		TLSEnabled:  true,
+		TLSCertFile: "missing-cert.pem",
+		TLSKeyFile:  "missing-key.pem",
+	})
+	if err := server.serveGRPC(newStubListener()); err == nil {
+		t.Fatal("expected serveGRPC to propagate grpcServer error")
 	}
 }
 

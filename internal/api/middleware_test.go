@@ -32,6 +32,12 @@ func TestGetClientIP(t *testing.T) {
 	if got := getClientIP(req); got != "1.2.3.4" {
 		t.Fatalf("getClientIP() = %q", got)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "raw-addr"
+	if got := getClientIP(req); got != "raw-addr" {
+		t.Fatalf("getClientIP() raw = %q", got)
+	}
 }
 
 func TestTrustedProxyClientIP(t *testing.T) {
@@ -51,6 +57,18 @@ func TestTrustedProxyClientIP(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
 	if got := server.getClientIP(req); got != "9.9.9.9" {
 		t.Fatalf("expected remote addr fallback, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	if got := server.getClientIP(req); got != "10.0.0.5" {
+		t.Fatalf("expected trusted proxy without xff to use remote host, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "raw-addr"
+	if got := server.getClientIP(req); got != "raw-addr" {
+		t.Fatalf("expected raw remote addr fallback, got %q", got)
 	}
 }
 
@@ -110,6 +128,30 @@ func TestRateLimitAndMetricsMiddleware(t *testing.T) {
 	handler.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429, got %d", rec2.Code)
+	}
+}
+
+func TestRateLimiterBranches(t *testing.T) {
+	if newRateLimiter(0, time.Second) != nil {
+		t.Fatal("expected disabled limiter for non-positive limit")
+	}
+	rl := newRateLimiter(1, time.Second)
+	if rl == nil {
+		t.Fatal("expected limiter")
+	}
+	if !rl.allow("client") {
+		t.Fatal("expected first request to pass")
+	}
+	if rl.allow("client") {
+		t.Fatal("expected second immediate request to be limited")
+	}
+	rl.mu.Lock()
+	bucket := rl.buckets["client"]
+	bucket.last = time.Now().Add(-2 * time.Second)
+	rl.buckets["client"] = bucket
+	rl.mu.Unlock()
+	if !rl.allow("client") {
+		t.Fatal("expected replenished bucket to pass")
 	}
 }
 

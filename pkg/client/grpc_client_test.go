@@ -89,6 +89,18 @@ func TestGRPCClientMappings(t *testing.T) {
 }
 
 func TestGRPCClientConstructorsAndAddVector(t *testing.T) {
+	if _, err := NewGRPCVectorClientWithDialer(" ", nil); err == nil {
+		t.Fatal("expected empty grpc address error")
+	}
+
+	newGRPCClient = func(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+		return nil, errors.New("dial setup failed")
+	}
+	if _, err := NewGRPCVectorClientWithDialer("localhost:19191", nil); err == nil {
+		t.Fatal("expected grpc constructor error")
+	}
+	newGRPCClient = grpc.NewClient
+
 	client, err := NewGRPCVectorClient("dns:///localhost:19191")
 	if err != nil {
 		t.Fatalf("NewGRPCVectorClient() error = %v", err)
@@ -208,6 +220,47 @@ func TestGRPCClientListVectorsPageOptions(t *testing.T) {
 	req := svc.requests[0]
 	if req.GetLimit() != 25 || req.GetCursor() != "cursor" || !req.GetIdsOnly() {
 		t.Fatalf("request = %+v, want limit/cursor/ids_only", req)
+	}
+}
+
+type stagnantCursorVecService struct {
+	fakeVecService
+	requests int
+}
+
+func (f *stagnantCursorVecService) ListVectors(ctx context.Context, in *lumenvecpb.ListVectorsRequest, opts ...grpc.CallOption) (*lumenvecpb.ListVectorsResponse, error) {
+	f.requests++
+	nextCursor := "same"
+	if f.requests > 1 {
+		nextCursor = in.GetCursor()
+	}
+	return &lumenvecpb.ListVectorsResponse{
+		Vectors:    []*lumenvecpb.Vector{{Id: "a", Values: []float64{1}}},
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func TestGRPCClientListVectorsRejectsStagnantCursor(t *testing.T) {
+	c := &GRPCVectorClient{client: &stagnantCursorVecService{}, timeout: time.Second}
+	if _, err := c.ListVectorsPage(ListVectorsOptions{Limit: -1}); err != nil {
+		t.Fatalf("ListVectorsPage() error = %v", err)
+	}
+
+	c = &GRPCVectorClient{client: &stagnantCursorVecService{}, timeout: time.Second}
+	if _, err := c.ListVectors(); err == nil {
+		t.Fatal("expected stagnant cursor error")
+	}
+}
+
+func TestGRPCListVectorsRequestLimitBounds(t *testing.T) {
+	if got := grpcListVectorsRequestLimit(defaultGRPCListVectorsLimit + 1); got != defaultGRPCListVectorsLimit {
+		t.Fatalf("upper bound = %d", got)
+	}
+	if got := grpcListVectorsRequestLimit(-1); got != -1 {
+		t.Fatalf("negative limit = %d", got)
+	}
+	if got := grpcListVectorsRequestLimit(0); got != 0 {
+		t.Fatalf("zero limit = %d", got)
 	}
 }
 
