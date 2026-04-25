@@ -87,4 +87,15 @@ func TestLevelDBStoreIterateBranches(t *testing.T) {
 	if seen == 0 {
 		t.Fatal("expected iterate to visit matching keys")
 	}
+
+	seen = 0
+	if err := store.Iterate("", func(key string, value interface{}) bool {
+		seen++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if seen < 3 {
+		t.Fatalf("expected empty prefix to visit all valid keys, got %d", seen)
+	}
 }

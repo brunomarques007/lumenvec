@@ -7,6 +7,9 @@ import (
 
 func TestIndexCRUD(t *testing.T) {
 	idx := NewIndex()
+	if _, err := idx.SearchVector("missing"); !errors.Is(err, ErrVectorNotFound) {
+		t.Fatalf("expected ErrVectorNotFound for missing search, got %v", err)
+	}
 	if err := idx.AddVector(Vector{ID: "a", Values: []float64{1, 2}}); err != nil {
 		t.Fatalf("AddVector() error = %v", err)
 	}
@@ -62,9 +65,9 @@ func TestIndexListAndRange(t *testing.T) {
 		if id == "" || len(values) != 2 {
 			t.Fatalf("unexpected RangeVectors32 item id=%q values=%v", id, values)
 		}
-		return true
+		return seen32 < 1
 	})
-	if seen32 != 2 {
-		t.Fatalf("expected 2 RangeVectors32 visits, got %d", seen32)
+	if seen32 != 1 {
+		t.Fatalf("expected early stop after 1 RangeVectors32 visit, got %d", seen32)
 	}
 }

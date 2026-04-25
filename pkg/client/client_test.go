@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,13 @@ func TestClientBatchOperations(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].ID != "doc-1" {
 		t.Fatal("unexpected search results")
+	}
+	batchResults, err := c.SearchVectors([]BatchSearchQuery{{ID: "q1", Values: []float64{1, 2, 3}, K: 1}})
+	if err != nil {
+		t.Fatalf("SearchVectors() error = %v", err)
+	}
+	if len(batchResults) != 1 || batchResults[0].ID != "q1" || len(batchResults[0].Results) != 1 {
+		t.Fatal("unexpected batch search results")
 	}
 	if err := c.DeleteVector("doc-1"); err != nil {
 		t.Fatalf("DeleteVector() error = %v", err)
@@ -140,7 +148,54 @@ func TestClientSearchStatusAndTransportErrors(t *testing.T) {
 	}
 
 	badClient := NewVectorClient("://bad-url")
+	if _, err := badClient.SearchVector([]float64{1}, 1); err == nil {
+		t.Fatal("expected search request creation error")
+	}
+	if _, err := badClient.SearchVectors([]BatchSearchQuery{{ID: "q", Values: []float64{1}, K: 1}}); err == nil {
+		t.Fatal("expected batch search request creation error")
+	}
+	if err := badClient.AddVectorWithID("doc-1", []float64{1}); err == nil {
+		t.Fatal("expected add request creation error")
+	}
 	if err := badClient.DeleteVector("doc-1"); err == nil {
 		t.Fatal("expected delete transport error")
 	}
+
+	deleteClient := NewVectorClient(srv.URL)
+	srv.Close()
+	if err := deleteClient.DeleteVector("doc-1"); err == nil {
+		t.Fatal("expected delete request transport error")
+	}
+}
+
+func TestClientSearchDecodeAndTransportErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/vectors/search", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{bad-json`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewVectorClient(srv.URL)
+	if _, err := c.SearchVector([]float64{1}, 1); err == nil {
+		t.Fatal("expected SearchVector decode error")
+	}
+
+	srv.Close()
+	if _, err := c.SearchVector([]float64{1}, 1); err == nil {
+		t.Fatal("expected SearchVector transport error")
+	}
+}
+
+func TestPutRequestBodyBufferBranches(t *testing.T) {
+	putRequestBodyBuffer(nil)
+
+	buf := bytes.NewBuffer(make([]byte, 0, (1<<20)+1))
+	putRequestBodyBuffer(buf)
+	reused := getRequestBodyBuffer()
+	if reused.Len() != 0 || reused.Cap() > 1<<20 {
+		t.Fatalf("expected oversized buffer to be replaced, len=%d cap=%d", reused.Len(), reused.Cap())
+	}
+	putRequestBodyBuffer(reused)
 }

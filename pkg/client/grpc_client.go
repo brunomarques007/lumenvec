@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	lumenvecpb "lumenvec/api/proto"
@@ -19,16 +20,21 @@ type GRPCVectorClient struct {
 
 const defaultGRPCListVectorsLimit = 1000
 
+var newGRPCClient = grpc.NewClient
+
 func NewGRPCVectorClient(address string) (*GRPCVectorClient, error) {
 	return NewGRPCVectorClientWithDialer(address, nil)
 }
 
 func NewGRPCVectorClientWithDialer(address string, dialOptions []grpc.DialOption) (*GRPCVectorClient, error) {
+	if strings.TrimSpace(address) == "" {
+		return nil, fmt.Errorf("grpc address is required")
+	}
 	options := append([]grpc.DialOption{}, dialOptions...)
 	if len(options) == 0 {
 		options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-	conn, err := grpc.NewClient(address, options...)
+	conn, err := newGRPCClient(address, options...)
 	if err != nil {
 		return nil, err
 	}
