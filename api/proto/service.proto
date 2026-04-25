@@ -21,10 +21,15 @@ message HealthResponse {
   string status = 1;
 }
 
-message ListVectorsRequest {}
+message ListVectorsRequest {
+  int32 limit = 1;
+  string cursor = 2;
+  bool ids_only = 3;
+}
 
 message ListVectorsResponse {
   repeated Vector vectors = 1;
+  string next_cursor = 2;
 }
 
 message Vector {

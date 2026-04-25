@@ -32,6 +32,12 @@ func TestGetClientIP(t *testing.T) {
 	if got := getClientIP(req); got != "1.2.3.4" {
 		t.Fatalf("getClientIP() = %q", got)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "raw-addr"
+	if got := getClientIP(req); got != "raw-addr" {
+		t.Fatalf("getClientIP() raw = %q", got)
+	}
 }
 
 func TestTrustedProxyClientIP(t *testing.T) {
@@ -51,6 +57,18 @@ func TestTrustedProxyClientIP(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
 	if got := server.getClientIP(req); got != "9.9.9.9" {
 		t.Fatalf("expected remote addr fallback, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	if got := server.getClientIP(req); got != "10.0.0.5" {
+		t.Fatalf("expected trusted proxy without xff to use remote host, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "raw-addr"
+	if got := server.getClientIP(req); got != "raw-addr" {
+		t.Fatalf("expected raw remote addr fallback, got %q", got)
 	}
 }
 
@@ -113,6 +131,30 @@ func TestRateLimitAndMetricsMiddleware(t *testing.T) {
 	}
 }
 
+func TestRateLimiterBranches(t *testing.T) {
+	if newRateLimiter(0, time.Second) != nil {
+		t.Fatal("expected disabled limiter for non-positive limit")
+	}
+	rl := newRateLimiter(1, time.Second)
+	if rl == nil {
+		t.Fatal("expected limiter")
+	}
+	if !rl.allow("client") {
+		t.Fatal("expected first request to pass")
+	}
+	if rl.allow("client") {
+		t.Fatal("expected second immediate request to be limited")
+	}
+	rl.mu.Lock()
+	bucket := rl.buckets["client"]
+	bucket.last = time.Now().Add(-2 * time.Second)
+	rl.buckets["client"] = bucket
+	rl.mu.Unlock()
+	if !rl.allow("client") {
+		t.Fatal("expected replenished bucket to pass")
+	}
+}
+
 func TestMetricsRegistryAndStatusRecorder(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sr := &statusRecorder{ResponseWriter: rec, status: http.StatusOK}
@@ -168,8 +210,19 @@ func TestMiddlewarePublicPathsAndAccessLog(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/x", nil)
 	access.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted || buf.Len() != 0 {
+		t.Fatal("expected access log to be disabled by default")
+	}
+
+	server.accessLog = true
+	access = server.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/x", nil)
+	access.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted || buf.Len() == 0 {
-		t.Fatal("expected access log output")
+		t.Fatal("expected access log output when enabled")
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
@@ -193,6 +246,7 @@ func TestMetricsEndpointExposesCoreStats(t *testing.T) {
 		SearchMode:        "ann",
 		ANNProfile:        "balanced",
 		ANNEvalSampleRate: 100,
+		MetricsEnabled:    true,
 		CacheEnabled:      true,
 		CacheMaxBytes:     2048,
 		CacheMaxItems:     2,
@@ -242,6 +296,32 @@ func TestMetricsEndpointExposesCoreStats(t *testing.T) {
 	}
 }
 
+func TestMetricsCanBeDisabled(t *testing.T) {
+	base := t.TempDir()
+	server := NewServerWithOptions(ServerOptions{
+		Port:           ":0",
+		ReadTimeout:    5 * time.Second,
+		WriteTimeout:   5 * time.Second,
+		MaxVectorDim:   8,
+		MaxK:           5,
+		SnapshotPath:   filepath.Join(base, "snapshot.json"),
+		WALPath:        filepath.Join(base, "wal.log"),
+		SnapshotEvery:  2,
+		MetricsEnabled: false,
+	})
+
+	if server.metricsRegistry != nil || server.requestTotal != nil || server.requestDuration != nil {
+		t.Fatal("expected metrics infrastructure to be disabled")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for disabled metrics endpoint, got %d", rec.Code)
+	}
+}
+
 func TestMetricsEndpointExposesDiskStoreStats(t *testing.T) {
 	base := t.TempDir()
 	server := NewServerWithOptions(ServerOptions{
@@ -258,6 +338,7 @@ func TestMetricsEndpointExposesDiskStoreStats(t *testing.T) {
 		ANNM:           24,
 		ANNEfConstruct: 96,
 		ANNEfSearch:    96,
+		MetricsEnabled: true,
 		VectorStore:    "disk",
 		VectorPath:     filepath.Join(base, "vectors"),
 	})

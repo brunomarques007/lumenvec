@@ -211,6 +211,48 @@ func TestServiceListVectorsEmptySortedAndAfterDelete(t *testing.T) {
 	}
 }
 
+func TestServiceDeleteVectorCompactsANNAfterTombstoneThreshold(t *testing.T) {
+	svc := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  2,
+		MaxK:          5,
+		SearchMode:    "ann",
+		SnapshotEvery: annDeleteRebuildMinDeleted * 2,
+		ANNOptions: ann.Options{
+			M:              4,
+			EfConstruction: 8,
+			EfSearch:       8,
+			Seed:           7,
+		},
+	}, ServiceDeps{Persistence: &noopPersistence{}})
+
+	for i := 0; i < annDeleteRebuildMinDeleted; i++ {
+		id := fmt.Sprintf("doc-%04d", i)
+		if err := svc.AddVector(id, []float64{float64(i), 0}); err != nil {
+			t.Fatalf("AddVector(%q): %v", id, err)
+		}
+	}
+
+	for i := 0; i < annDeleteRebuildMinDeleted-1; i++ {
+		id := fmt.Sprintf("doc-%04d", i)
+		if err := svc.DeleteVector(id); err != nil {
+			t.Fatalf("DeleteVector(%q): %v", id, err)
+		}
+	}
+	stats := svc.Stats()
+	if stats.ANNDeleted != annDeleteRebuildMinDeleted-1 {
+		t.Fatalf("ANNDeleted before threshold = %d, want %d", stats.ANNDeleted, annDeleteRebuildMinDeleted-1)
+	}
+
+	lastID := fmt.Sprintf("doc-%04d", annDeleteRebuildMinDeleted-1)
+	if err := svc.DeleteVector(lastID); err != nil {
+		t.Fatalf("DeleteVector(%q): %v", lastID, err)
+	}
+	stats = svc.Stats()
+	if stats.ANNDeleted != 0 || stats.ANNNodes != 0 {
+		t.Fatalf("stats after compaction = %+v, want empty ANN without tombstones", stats)
+	}
+}
+
 func TestServiceListVectorsSortsLexicographic(t *testing.T) {
 	svc := NewServiceWithDeps(ServiceOptions{
 		MaxVectorDim:  8,
@@ -542,9 +584,8 @@ func TestServiceDeleteRollbackAndHelpers(t *testing.T) {
 	}
 
 	acc := topKAccumulator{}
-	acc.recomputeWorst()
-	if acc.worstIndex != -1 {
-		t.Fatal("expected empty accumulator worstIndex")
+	if len(acc.Results()) != 0 {
+		t.Fatal("expected empty accumulator results")
 	}
 
 	if err := svc.DeleteVector("missing"); !errors.Is(err, index.ErrVectorNotFound) {
@@ -792,8 +833,9 @@ func TestServiceGetVectorUsesVectorStore(t *testing.T) {
 	}
 }
 
-func TestServiceSearchANNUsesVectorStoreForRescore(t *testing.T) {
+func TestServiceSearchANNUsesIndexDistanceWithoutVectorStoreRescore(t *testing.T) {
 	resolver := newMemoryIDResolver()
+	storeReads := 0
 
 	svc := NewServiceWithDeps(ServiceOptions{
 		MaxVectorDim:  8,
@@ -806,10 +848,8 @@ func TestServiceSearchANNUsesVectorStoreForRescore(t *testing.T) {
 		Index: index.NewIndex(),
 		VectorStore: &stubVectorStore{
 			getFn: func(id string) (index.Vector, error) {
-				if id != "ann-store" {
-					t.Fatalf("unexpected vector store lookup %q", id)
-				}
-				return index.Vector{ID: id, Values: []float64{1, 2, 3}}, nil
+				storeReads++
+				return index.Vector{}, errors.New("unexpected vector store lookup")
 			},
 		},
 		ANNIndex:    ann.NewAnnIndex(),
@@ -826,7 +866,10 @@ func TestServiceSearchANNUsesVectorStoreForRescore(t *testing.T) {
 		t.Fatal("expected ANN search to succeed")
 	}
 	if len(results) != 1 || results[0].ID != "ann-store" {
-		t.Fatal("expected ANN rescore to use vector store payload")
+		t.Fatal("expected ANN search to use index payload")
+	}
+	if storeReads != 0 {
+		t.Fatalf("vector store reads = %d, want 0", storeReads)
 	}
 }
 
@@ -1380,8 +1423,10 @@ func TestServiceLoadSnapshotAndReplayWALErrorBranches(t *testing.T) {
 		vectorStore: &stubVectorStore{
 			upsertFn: func(index.Vector) error { return errors.New("wal upsert failed") },
 		},
-		idResolver:   newMemoryIDResolver(),
-		persistence:  &stubPersistence{replayWALFn: func(apply func(walOp) error) error { return apply(walOp{Op: "upsert", ID: "a", Values: []float64{1, 2, 3}}) }},
+		idResolver: newMemoryIDResolver(),
+		persistence: &stubPersistence{replayWALFn: func(apply func(walOp) error) error {
+			return apply(walOp{Op: "upsert", ID: "a", Values: []float64{1, 2, 3}})
+		}},
 		maxVectorDim: 8,
 		maxK:         5,
 		snapshotPath: filepath.Join(base, "snapshot2.json"),

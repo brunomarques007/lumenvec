@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+
+	"lumenvec/internal/vector"
 )
 
 func TestAnnIndexBasicSearch(t *testing.T) {
@@ -27,6 +29,122 @@ func TestAnnIndexBasicSearch(t *testing.T) {
 	}
 	if got[0] != 1 && got[0] != 2 {
 		t.Fatalf("unexpected nearest id: %d", got[0])
+	}
+
+	withDistances, err := idx.SearchWithDistances([]float64{0.1, 0.1}, 2)
+	if err != nil {
+		t.Fatalf("search with distances failed: %v", err)
+	}
+	if len(withDistances) != 2 {
+		t.Fatalf("expected 2 neighbors with distances, got %d", len(withDistances))
+	}
+	if withDistances[0].Distance > withDistances[1].Distance {
+		t.Fatalf("expected sorted distances, got %+v", withDistances)
+	}
+	if withDistances[0].ID != got[0] {
+		t.Fatalf("SearchWithDistances first id = %d, want %d", withDistances[0].ID, got[0])
+	}
+}
+
+func TestAnnIndexDeleteVectorUsesTombstone(t *testing.T) {
+	idx := NewAnnIndexWithOptions(Options{
+		M:              8,
+		EfConstruction: 32,
+		EfSearch:       32,
+		Seed:           7,
+	})
+
+	_ = idx.AddVector(1, []float64{0, 0})
+	_ = idx.AddVector(2, []float64{0.1, 0.1})
+	_ = idx.AddVector(3, []float64{10, 10})
+
+	idx.DeleteVector(1)
+	stats := idx.Stats()
+	if stats.Nodes != 3 || stats.Deleted != 1 {
+		t.Fatalf("stats after delete = %+v, want 3 nodes and 1 deleted", stats)
+	}
+
+	got, err := idx.Search([]float64{0, 0}, 2)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if slices.Contains(got, 1) {
+		t.Fatalf("deleted id returned in results: %v", got)
+	}
+
+	_ = idx.AddVector(1, []float64{0, 0})
+	stats = idx.Stats()
+	if stats.Nodes != 3 || stats.Deleted != 0 {
+		t.Fatalf("stats after re-add = %+v, want 3 nodes and 0 deleted", stats)
+	}
+
+	got, err = idx.Search([]float64{0, 0}, 1)
+	if err != nil {
+		t.Fatalf("search failed after re-add: %v", err)
+	}
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("re-added id not returned first: %v", got)
+	}
+}
+
+func TestAnnIndexUsesCompactSlotsWithSparseExternalIDs(t *testing.T) {
+	idx := NewAnnIndexWithOptions(Options{
+		M:              8,
+		EfConstruction: 32,
+		EfSearch:       32,
+		Seed:           7,
+	})
+
+	_ = idx.AddVector(1001, []float64{0, 0})
+	_ = idx.AddVector(42, []float64{1, 1})
+	_ = idx.AddVector(900000, []float64{10, 10})
+
+	if got, want := len(idx.nodes), 3; got != want {
+		t.Fatalf("compact node count = %d, want %d", got, want)
+	}
+	if idx.nodes[idx.idToSlot[1001]].id != 1001 {
+		t.Fatal("expected sparse external id to resolve through slot map")
+	}
+
+	got, err := idx.Search([]float64{0, 0}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0] != 1001 {
+		t.Fatalf("Search returned public IDs %v, want 1001 first", got)
+	}
+
+	withDistances, err := idx.SearchWithDistances([]float64{10, 10}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withDistances) != 1 || withDistances[0].ID != 900000 {
+		t.Fatalf("SearchWithDistances returned %+v, want external id 900000", withDistances)
+	}
+}
+
+func TestAnnIndexSearchWithDistancesIntoReusesBuffer(t *testing.T) {
+	idx := NewAnnIndexWithOptions(Options{
+		M:              8,
+		EfConstruction: 32,
+		EfSearch:       32,
+		Seed:           7,
+	})
+
+	_ = idx.AddVector(1, []float64{0, 0})
+	_ = idx.AddVector(2, []float64{1, 1})
+	_ = idx.AddVector(3, []float64{10, 10})
+
+	buf := make([]Result, 0, 4)
+	got, err := idx.SearchWithDistancesInto([]float64{0, 0}, 2, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || cap(got) != cap(buf) {
+		t.Fatalf("SearchWithDistancesInto len/cap = %d/%d, want len 2 cap %d", len(got), cap(got), cap(buf))
+	}
+	if got[0].ID != 1 {
+		t.Fatalf("SearchWithDistancesInto first = %+v, want id 1", got[0])
 	}
 }
 
@@ -116,6 +234,35 @@ func BenchmarkAnnSearchTuning(b *testing.B) {
 				_, err := idx.Search(query, 10)
 				if err != nil {
 					b.Fatalf("search failed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAnnSearchEmbeddingDimensions(b *testing.B) {
+	for _, dim := range []int{384, 768, 1536} {
+		b.Run(fmt.Sprintf("dim_%d", dim), func(b *testing.B) {
+			idx := NewAnnIndexWithOptions(Options{
+				M:              16,
+				EfConstruction: 64,
+				EfSearch:       64,
+				Seed:           9,
+			})
+
+			for i := 0; i < 512; i++ {
+				if err := idx.AddVector(i, benchmarkEmbeddingVector(dim, i)); err != nil {
+					b.Fatal(err)
+				}
+			}
+
+			query := benchmarkEmbeddingVector(dim, 3)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, err := idx.Search(query, 10)
+				if err != nil {
+					b.Fatal(err)
 				}
 			}
 		})
@@ -212,6 +359,16 @@ func benchmarkAnnDataset(n int) []benchmarkAnnItem {
 	return out
 }
 
+func benchmarkEmbeddingVector(dim int, seed int) []float64 {
+	values := make([]float64, dim)
+	state := uint64(seed + 1)
+	for i := range values {
+		state = state*6364136223846793005 + 1442695040888963407
+		values[i] = float64(int(state>>48)%2000-1000) / 1000
+	}
+	return values
+}
+
 func bruteForceTopK(dataset []benchmarkAnnItem, query []float64, k int) []int {
 	type scored struct {
 		id       int
@@ -221,7 +378,7 @@ func bruteForceTopK(dataset []benchmarkAnnItem, query []float64, k int) []int {
 	for _, item := range dataset {
 		scoredItems = append(scoredItems, scored{
 			id:       item.id,
-			distance: euclideanDistance(query, item.vector),
+			distance: vector.SquaredEuclideanDistance(query, item.vector),
 		})
 	}
 	slices.SortFunc(scoredItems, func(a, b scored) int {

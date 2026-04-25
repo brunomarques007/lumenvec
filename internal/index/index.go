@@ -3,6 +3,8 @@ package index
 import (
 	"errors"
 	"sync"
+
+	"lumenvec/internal/vector"
 )
 
 var (
@@ -16,16 +18,21 @@ type Vector struct {
 	Values []float64
 }
 
+type storedVector struct {
+	id     string
+	values []float32
+}
+
 // Index manages a collection of vectors for searching.
 type Index struct {
-	vectors map[string]Vector
+	vectors map[string]storedVector
 	mu      sync.RWMutex
 }
 
 // NewIndex creates a new instance of Index.
 func NewIndex() *Index {
 	return &Index{
-		vectors: make(map[string]Vector),
+		vectors: make(map[string]storedVector),
 	}
 }
 
@@ -37,7 +44,7 @@ func (i *Index) AddVector(vec Vector) error {
 	if _, exists := i.vectors[vec.ID]; exists {
 		return ErrVectorExists
 	}
-	i.vectors[vec.ID] = Vector{ID: vec.ID, Values: cloneValues(vec.Values)}
+	i.vectors[vec.ID] = storedVector{id: vec.ID, values: vector.ToFloat32(vec.Values)}
 	return nil
 }
 
@@ -50,7 +57,7 @@ func (i *Index) SearchVector(id string) (Vector, error) {
 	if !exists {
 		return Vector{}, ErrVectorNotFound
 	}
-	return Vector{ID: vec.ID, Values: cloneValues(vec.Values)}, nil
+	return Vector{ID: vec.id, Values: vector.ToFloat64(vec.values)}, nil
 }
 
 // DeleteVector removes a vector from the index by its ID.
@@ -72,7 +79,7 @@ func (i *Index) ListVectors() []Vector {
 
 	out := make([]Vector, 0, len(i.vectors))
 	for _, vec := range i.vectors {
-		out = append(out, Vector{ID: vec.ID, Values: cloneValues(vec.Values)})
+		out = append(out, Vector{ID: vec.id, Values: vector.ToFloat64(vec.values)})
 	}
 	return out
 }
@@ -84,14 +91,21 @@ func (i *Index) RangeVectors(fn func(Vector) bool) {
 	defer i.mu.RUnlock()
 
 	for _, vec := range i.vectors {
-		if !fn(vec) {
+		if !fn(Vector{ID: vec.id, Values: vector.ToFloat64(vec.values)}) {
 			return
 		}
 	}
 }
 
-func cloneValues(values []float64) []float64 {
-	out := make([]float64, len(values))
-	copy(out, values)
-	return out
+// RangeVectors32 iterates over internal float32 vectors without per-vector conversion.
+// Callers must treat the values slice as read-only and must not retain references.
+func (i *Index) RangeVectors32(fn func(id string, values []float32) bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	for _, vec := range i.vectors {
+		if !fn(vec.id, vec.values) {
+			return
+		}
+	}
 }

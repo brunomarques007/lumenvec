@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -21,6 +22,11 @@ var (
 	ErrInvalidK         = errors.New("k must be greater than 0")
 	ErrKTooHigh         = errors.New("k exceeds configured max")
 	errSkipWALOp        = errors.New("skip wal op")
+)
+
+const (
+	annDeleteRebuildMinDeleted = 1024
+	annDeleteRebuildRatio      = 0.25
 )
 
 type SearchResult struct {
@@ -53,6 +59,7 @@ type ServiceOptions struct {
 	VectorPath        string
 	Cache             CacheOptions
 	StorageSecurity   StorageSecurityOptions
+	SyncEvery         int
 }
 
 type VectorIndex interface {
@@ -61,6 +68,10 @@ type VectorIndex interface {
 	DeleteVector(id string) error
 	ListVectors() []index.Vector
 	RangeVectors(fn func(index.Vector) bool)
+}
+
+type vectorIndex32Ranger interface {
+	RangeVectors32(fn func(id string, values []float32) bool)
 }
 
 type IDResolver interface {
@@ -92,9 +103,14 @@ type Service struct {
 	annEvalSampleRate int
 	persistOps        int
 	persistMu         sync.Mutex
+	syncEvery         int
 	vectorStore       VectorStore
 	idResolver        IDResolver
 	persistence       PersistenceBackend
+	annResultPool     sync.Pool
+	query32Pool       sync.Pool
+	batchQuery32Pool  sync.Pool
+	batchPreparedPool sync.Pool
 	stats             serviceStats
 }
 
@@ -110,6 +126,8 @@ type ServiceStats struct {
 	ANNEvalTop1Matches     uint64 `json:"ann_eval_top1_matches_total"`
 	ANNEvalOverlapResults  uint64 `json:"ann_eval_overlap_results_total"`
 	ANNEvalComparedResults uint64 `json:"ann_eval_compared_results_total"`
+	ANNNodes               int    `json:"ann_nodes"`
+	ANNDeleted             int    `json:"ann_deleted"`
 	CacheHitsTotal         uint64 `json:"cache_hits_total"`
 	CacheMissesTotal       uint64 `json:"cache_misses_total"`
 	CacheEvictionsTotal    uint64 `json:"cache_evictions_total"`
@@ -146,16 +164,18 @@ type walOp struct {
 }
 
 type preparedBatchQuery struct {
-	id   string
-	vals []float64
-	acc  topKAccumulator
+	id     string
+	vals   []float64
+	vals32 []float32
+	acc    topKAccumulator
 }
 
 type topKAccumulator struct {
-	limit      int
-	items      []SearchResult
-	worstIndex int
+	limit int
+	items []SearchResult
 }
+
+const exactBatchDistanceWidth = 4
 
 func NewService(opts ServiceOptions) *Service {
 	return NewServiceWithDeps(opts, ServiceDeps{})
@@ -166,7 +186,7 @@ func NewServiceWithDeps(opts ServiceOptions, deps ServiceDeps) *Service {
 		deps.Index = index.NewIndex()
 	}
 	if deps.VectorStore == nil {
-		deps.VectorStore = newDefaultVectorStore(opts.VectorStore, opts.VectorPath, opts.StorageSecurity)
+		deps.VectorStore = newDefaultVectorStoreWithOptions(opts.VectorStore, opts.VectorPath, opts.StorageSecurity, opts.SyncEvery)
 	}
 	deps.VectorStore = newCachedVectorStore(deps.VectorStore, opts.Cache)
 	if deps.ANNIndex == nil {
@@ -176,7 +196,7 @@ func NewServiceWithDeps(opts ServiceOptions, deps ServiceDeps) *Service {
 		deps.IDResolver = newMemoryIDResolver()
 	}
 	if deps.Persistence == nil {
-		deps.Persistence = newSnapshotWALBackendWithSecurity(opts.SnapshotPath, opts.WALPath, opts.StorageSecurity)
+		deps.Persistence = newSnapshotWALBackendWithOptions(opts.SnapshotPath, opts.WALPath, opts.StorageSecurity, opts.SyncEvery)
 	}
 
 	svc := &Service{
@@ -191,9 +211,30 @@ func NewServiceWithDeps(opts ServiceOptions, deps ServiceDeps) *Service {
 		annProfile:        normalizeANNProfile(opts.ANNProfile),
 		annOptions:        opts.ANNOptions,
 		annEvalSampleRate: clampPercent(opts.ANNEvalSampleRate),
+		syncEvery:         normalizeSyncEvery(opts.SyncEvery),
 		vectorStore:       deps.VectorStore,
 		idResolver:        deps.IDResolver,
 		persistence:       deps.Persistence,
+	}
+	svc.annResultPool.New = func() any {
+		capHint := 64
+		if svc.maxK > 0 && svc.maxK < capHint {
+			capHint = svc.maxK
+		}
+		buf := make([]ann.Result, 0, capHint)
+		return &buf
+	}
+	svc.query32Pool.New = func() any {
+		buf := make([]float32, 0, maxIntOrOne(svc.maxVectorDim))
+		return &buf
+	}
+	svc.batchQuery32Pool.New = func() any {
+		buf := make([]float32, 0, maxIntOrOne(svc.maxVectorDim))
+		return &buf
+	}
+	svc.batchPreparedPool.New = func() any {
+		buf := make([]preparedBatchQuery, 0, 16)
+		return &buf
 	}
 
 	_ = svc.restoreState()
@@ -232,11 +273,15 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 			s.rollbackAddedVectors(addedIDs)
 			return err
 		}
-		if err := s.vectorStore.UpsertVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
-			_ = s.index.DeleteVector(vec.ID)
-			s.rollbackAddedVectors(addedIDs)
-			return err
-		}
+		addedIDs = append(addedIDs, vec.ID)
+	}
+
+	if err := s.upsertVectors(vectors); err != nil {
+		s.rollbackAddedVectors(addedIDs)
+		return err
+	}
+
+	for _, vec := range vectors {
 		internalID := s.idResolver.Assign(vec.ID)
 		if err := s.addANNVector(internalID, vec.Values); err != nil {
 			_ = s.vectorStore.DeleteVector(vec.ID)
@@ -244,14 +289,15 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 			s.rollbackAddedVectors(addedIDs)
 			return err
 		}
-		addedIDs = append(addedIDs, vec.ID)
 	}
 
+	ops := make([]walOp, 0, len(vectors))
 	for _, vec := range vectors {
-		if err := s.appendWAL(walOp{Op: "upsert", ID: vec.ID, Values: vec.Values}); err != nil {
-			s.rollbackAddedVectors(addedIDs)
-			return err
-		}
+		ops = append(ops, walOp{Op: "upsert", ID: vec.ID, Values: vec.Values})
+	}
+	if err := s.appendWALBatch(ops); err != nil {
+		s.rollbackAddedVectors(addedIDs)
+		return err
 	}
 	return s.maybeSnapshot()
 }
@@ -291,15 +337,18 @@ func (s *Service) DeleteVector(id string) error {
 		_ = s.index.AddVector(vec)
 		return err
 	}
+	internalID := s.idResolver.Assign(id)
+	s.deleteANNVector(internalID)
 	s.idResolver.Remove(id)
-	s.rebuildANNLocked()
 
 	if err := s.appendWAL(walOp{Op: "delete", ID: id}); err != nil {
 		_ = s.vectorStore.UpsertVector(vec)
 		_ = s.index.AddVector(vec)
+		s.idResolver.Assign(id)
 		s.rebuildANNLocked()
 		return err
 	}
+	s.maybeCompactANNAfterDeleteLocked()
 	return s.maybeSnapshot()
 }
 
@@ -328,7 +377,24 @@ func (s *Service) SearchBatch(queries []BatchSearchQuery) ([]BatchSearchResult, 
 		return nil, ErrInvalidValues
 	}
 
-	prepared := make([]preparedBatchQuery, 0, len(queries))
+	preparedBuf := s.getPreparedBatchBuffer(len(queries))
+	defer s.putPreparedBatchBuffer(preparedBuf)
+	prepared := (*preparedBuf)[:0]
+	exactMode := s.searchMode != "ann"
+	totalQueryValues := 0
+	if exactMode {
+		for _, query := range queries {
+			totalQueryValues += len(query.Values)
+		}
+	}
+	var query32Buf *[]float32
+	var query32Block []float32
+	if totalQueryValues > 0 {
+		query32Buf = s.getBatchQuery32Buffer(totalQueryValues)
+		query32Block = (*query32Buf)[:totalQueryValues]
+		defer s.putBatchQuery32Buffer(query32Buf)
+	}
+	query32Offset := 0
 	for i, query := range queries {
 		if err := s.validateSearchRequest(query.Values, query.K); err != nil {
 			return nil, err
@@ -337,10 +403,17 @@ func (s *Service) SearchBatch(queries []BatchSearchQuery) ([]BatchSearchResult, 
 		if queryID == "" {
 			queryID = fmt.Sprintf("query-%d", i)
 		}
+		var query32 []float32
+		if exactMode {
+			query32 = query32Block[query32Offset : query32Offset+len(query.Values)]
+			fillQuery32Buffer(query32, query.Values)
+			query32Offset += len(query.Values)
+		}
 		prepared = append(prepared, preparedBatchQuery{
-			id:   queryID,
-			vals: query.Values,
-			acc:  newTopKAccumulator(query.K),
+			id:     queryID,
+			vals:   query.Values,
+			vals32: query32,
+			acc:    newTopKAccumulator(query.K),
 		})
 	}
 
@@ -356,23 +429,44 @@ func (s *Service) SearchBatch(queries []BatchSearchQuery) ([]BatchSearchResult, 
 		return results, nil
 	}
 
-	s.index.RangeVectors(func(vec index.Vector) bool {
-		for i := range prepared {
-			dist := vector.EuclideanDistance(prepared[i].vals, vec.Values)
+	s.rangeExactVectors(func(id string, values []float32) bool {
+		for i := 0; i+exactBatchDistanceWidth <= len(prepared); i += exactBatchDistanceWidth {
+			q0 := prepared[i].vals32
+			q1 := prepared[i+1].vals32
+			q2 := prepared[i+2].vals32
+			q3 := prepared[i+3].vals32
+			if len(q0) == len(values) && len(q1) == len(values) && len(q2) == len(values) && len(q3) == len(values) {
+				d0, d1, d2, d3 := vector.SquaredEuclideanDistance32x4SameLen(q0, q1, q2, q3, values)
+				prepared[i].acc.Add(SearchResult{ID: id, Distance: d0})
+				prepared[i+1].acc.Add(SearchResult{ID: id, Distance: d1})
+				prepared[i+2].acc.Add(SearchResult{ID: id, Distance: d2})
+				prepared[i+3].acc.Add(SearchResult{ID: id, Distance: d3})
+				continue
+			}
+			for j := 0; j < exactBatchDistanceWidth; j++ {
+				dist := vector.SquaredEuclideanDistance32(prepared[i+j].vals32, values)
+				if dist != dist {
+					continue
+				}
+				prepared[i+j].acc.Add(SearchResult{ID: id, Distance: dist})
+			}
+		}
+		for i := len(prepared) - len(prepared)%exactBatchDistanceWidth; i < len(prepared); i++ {
+			dist := vector.SquaredEuclideanDistance32(prepared[i].vals32, values)
 			if dist != dist {
 				continue
 			}
-			prepared[i].acc.Add(SearchResult{ID: vec.ID, Distance: dist})
+			prepared[i].acc.Add(SearchResult{ID: id, Distance: dist})
 		}
 		return true
 	})
 
-	results := make([]BatchSearchResult, 0, len(prepared))
-	for _, query := range prepared {
-		results = append(results, BatchSearchResult{
+	results := make([]BatchSearchResult, len(prepared))
+	for i, query := range prepared {
+		results[i] = BatchSearchResult{
 			ID:      query.id,
 			Results: query.acc.Results(),
-		})
+		}
 	}
 	return results, nil
 }
@@ -394,65 +488,159 @@ func (s *Service) validateSearchRequest(values []float64, k int) error {
 }
 
 func (s *Service) searchExact(values []float64, k int) []SearchResult {
+	query32 := s.getQuery32Buffer(values)
+	defer s.putQuery32Buffer(query32)
+
 	acc := newTopKAccumulator(k)
-	s.index.RangeVectors(func(vec index.Vector) bool {
-		dist := vector.EuclideanDistance(values, vec.Values)
+	s.rangeExactVectors(func(id string, vecValues []float32) bool {
+		dist := vector.SquaredEuclideanDistance32SameLen(*query32, vecValues)
 		if dist == dist {
-			acc.Add(SearchResult{ID: vec.ID, Distance: dist})
+			acc.Add(SearchResult{ID: id, Distance: dist})
 		}
 		return true
 	})
 	return acc.Results()
 }
 
+func (s *Service) rangeExactVectors(fn func(id string, values []float32) bool) {
+	if ranger, ok := s.index.(vectorIndex32Ranger); ok {
+		ranger.RangeVectors32(fn)
+		return
+	}
+	s.index.RangeVectors(func(vec index.Vector) bool {
+		return fn(vec.ID, vector.ToFloat32(vec.Values))
+	})
+}
+
 func (s *Service) searchANN(values []float64, k int) ([]SearchResult, bool) {
 	s.stats.annSearchesTotal.Add(1)
 	annIndex := s.currentANNIndex()
-	ids, err := annIndex.Search(values, k)
+	candidateBuf := s.getANNResultBuffer()
+	candidates, err := annIndex.SearchWithDistancesInto(values, k, *candidateBuf)
+	defer s.putANNResultBuffer(candidateBuf, candidates)
 	if err != nil {
 		s.stats.annSearchErrorsTotal.Add(1)
 		return nil, false
 	}
-	s.stats.annCandidatesReturned.Add(uint64(len(ids)))
+	s.stats.annCandidatesReturned.Add(uint64(len(candidates)))
 
-	results := make([]SearchResult, 0, len(ids))
-	for _, internalID := range ids {
-		id, ok := s.idResolver.Lookup(internalID)
+	results := make([]SearchResult, 0, len(candidates))
+	for _, candidate := range candidates {
+		id, ok := s.idResolver.Lookup(candidate.ID)
 		if !ok {
 			continue
 		}
-		vec, err := s.getVectorForRead(id)
-		if err != nil {
+		if candidate.Distance != candidate.Distance {
 			continue
 		}
-		dist := vector.EuclideanDistance(values, vec.Values)
-		if dist != dist {
-			continue
-		}
-		results = append(results, SearchResult{ID: vec.ID, Distance: dist})
+		results = append(results, SearchResult{ID: id, Distance: candidate.Distance})
 	}
 	if len(results) == 0 {
 		return nil, false
 	}
 	s.stats.annSearchHitsTotal.Add(1)
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Distance < results[j].Distance
-	})
-	if k < len(results) {
-		results = results[:k]
+	for i := range results {
+		results[i].Distance = sqrtDistance(results[i].Distance)
 	}
 	return results, true
 }
 
-func (s *Service) getVectorForRead(id string) (index.Vector, error) {
-	if reader, ok := s.vectorStore.(readOnlyVectorReader); ok {
-		return reader.GetVectorReadOnly(id)
+func (s *Service) getANNResultBuffer() *[]ann.Result {
+	got := s.annResultPool.Get()
+	if got == nil {
+		buf := make([]ann.Result, 0, minInt(maxIntOrOne(s.maxK), 64))
+		return &buf
 	}
-	return s.vectorStore.GetVector(id)
+	buf := got.(*[]ann.Result)
+	*buf = (*buf)[:0]
+	return buf
+}
+
+func (s *Service) putANNResultBuffer(buf *[]ann.Result, results []ann.Result) {
+	results = results[:0]
+	*buf = results
+	s.annResultPool.Put(buf)
+}
+
+func (s *Service) getQuery32Buffer(values []float64) *[]float32 {
+	got := s.query32Pool.Get()
+	if got == nil {
+		buf := make([]float32, len(values))
+		fillQuery32Buffer(buf, values)
+		return &buf
+	}
+	buf := got.(*[]float32)
+	if cap(*buf) < len(values) {
+		*buf = make([]float32, len(values))
+	} else {
+		*buf = (*buf)[:len(values)]
+	}
+	fillQuery32Buffer(*buf, values)
+	return buf
+}
+
+func (s *Service) putQuery32Buffer(buf *[]float32) {
+	*buf = (*buf)[:0]
+	s.query32Pool.Put(buf)
+}
+
+func (s *Service) getBatchQuery32Buffer(size int) *[]float32 {
+	got := s.batchQuery32Pool.Get()
+	if got == nil {
+		buf := make([]float32, size)
+		return &buf
+	}
+	buf := got.(*[]float32)
+	if cap(*buf) < size {
+		*buf = make([]float32, size)
+	} else {
+		*buf = (*buf)[:size]
+	}
+	return buf
+}
+
+func (s *Service) putBatchQuery32Buffer(buf *[]float32) {
+	*buf = (*buf)[:0]
+	s.batchQuery32Pool.Put(buf)
+}
+
+func (s *Service) getPreparedBatchBuffer(size int) *[]preparedBatchQuery {
+	got := s.batchPreparedPool.Get()
+	if got == nil {
+		buf := make([]preparedBatchQuery, 0, size)
+		return &buf
+	}
+	buf := got.(*[]preparedBatchQuery)
+	if cap(*buf) < size {
+		*buf = make([]preparedBatchQuery, 0, size)
+	} else {
+		*buf = (*buf)[:0]
+	}
+	return buf
+}
+
+func (s *Service) putPreparedBatchBuffer(buf *[]preparedBatchQuery) {
+	for i := range *buf {
+		(*buf)[i] = preparedBatchQuery{}
+	}
+	*buf = (*buf)[:0]
+	s.batchPreparedPool.Put(buf)
+}
+
+func fillQuery32Buffer(dst []float32, values []float64) {
+	for i, value := range values {
+		dst[i] = float32(value)
+	}
 }
 
 func newTopKAccumulator(limit int) topKAccumulator {
-	return topKAccumulator{limit: limit, worstIndex: -1}
+	if limit <= 0 {
+		return topKAccumulator{}
+	}
+	return topKAccumulator{
+		limit: limit,
+		items: make([]SearchResult, 0, limit),
+	}
 }
 
 func (a *topKAccumulator) Add(item SearchResult) {
@@ -460,38 +648,66 @@ func (a *topKAccumulator) Add(item SearchResult) {
 		return
 	}
 	if len(a.items) < a.limit {
-		a.items = append(a.items, item)
-		a.recomputeWorst()
+		a.push(item)
 		return
 	}
-	if item.Distance >= a.items[a.worstIndex].Distance {
+	if item.Distance >= a.items[0].Distance {
 		return
 	}
-	a.items[a.worstIndex] = item
-	a.recomputeWorst()
+	a.replaceTop(item)
 }
 
 func (a *topKAccumulator) Results() []SearchResult {
-	out := make([]SearchResult, len(a.items))
-	copy(out, a.items)
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Distance < out[j].Distance
+	if len(a.items) == 0 {
+		return nil
+	}
+	sort.Slice(a.items, func(i, j int) bool {
+		return a.items[i].Distance < a.items[j].Distance
 	})
-	return out
+	for i := range a.items {
+		a.items[i].Distance = sqrtDistance(a.items[i].Distance)
+	}
+	return a.items
 }
 
-func (a *topKAccumulator) recomputeWorst() {
-	if len(a.items) == 0 {
-		a.worstIndex = -1
-		return
-	}
-	worst := 0
-	for i := 1; i < len(a.items); i++ {
-		if a.items[i].Distance > a.items[worst].Distance {
-			worst = i
+func (a *topKAccumulator) push(item SearchResult) {
+	a.items = append(a.items, item)
+	upSearchResultMax(a.items, len(a.items)-1)
+}
+
+func (a *topKAccumulator) replaceTop(item SearchResult) {
+	a.items[0] = item
+	downSearchResultMax(a.items, 0)
+}
+
+func upSearchResultMax(h []SearchResult, j int) {
+	for {
+		i := (j - 1) / 2
+		if i == j || h[j].Distance <= h[i].Distance {
+			break
 		}
+		h[i], h[j] = h[j], h[i]
+		j = i
 	}
-	a.worstIndex = worst
+}
+
+func downSearchResultMax(h []SearchResult, i int) {
+	for {
+		left := 2*i + 1
+		if left >= len(h) {
+			break
+		}
+		child := left
+		right := left + 1
+		if right < len(h) && h[right].Distance > h[left].Distance {
+			child = right
+		}
+		if h[i].Distance >= h[child].Distance {
+			break
+		}
+		h[i], h[child] = h[child], h[i]
+		i = child
+	}
 }
 
 func normalizeSearchMode(mode string) string {
@@ -508,6 +724,21 @@ func (s *Service) rollbackAddedVectors(ids []string) {
 		_ = s.index.DeleteVector(id)
 	}
 	s.rebuildANNLocked()
+}
+
+func (s *Service) upsertVectors(vectors []index.Vector) error {
+	if len(vectors) == 0 {
+		return nil
+	}
+	if writer, ok := s.vectorStore.(batchVectorStore); ok {
+		return writer.UpsertVectors(vectors)
+	}
+	for _, vec := range vectors {
+		if err := s.vectorStore.UpsertVector(index.Vector{ID: vec.ID, Values: vec.Values}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) restoreState() error {
@@ -544,11 +775,27 @@ func (s *Service) saveSnapshot() error {
 }
 
 func (s *Service) appendWAL(op walOp) error {
+	return s.appendWALBatch([]walOp{op})
+}
+
+func (s *Service) appendWALBatch(ops []walOp) error {
 	s.ensureRuntimeDeps()
+	if len(ops) == 0 {
+		return nil
+	}
 	if s.usesPersistentVectorStore() {
 		return nil
 	}
-	return s.persistenceBackend().AppendWAL(op)
+	backend := s.persistenceBackend()
+	if batcher, ok := backend.(interface{ AppendWALBatch([]walOp) error }); ok {
+		return batcher.AppendWALBatch(ops)
+	}
+	for _, op := range ops {
+		if err := backend.AppendWAL(op); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) replayWAL() error {
@@ -605,6 +852,9 @@ func (s *Service) maybeSnapshot() error {
 	s.persistOps++
 	if s.persistOps < s.snapshotEvery {
 		return nil
+	}
+	if err := s.syncPersistence(); err != nil {
+		return err
 	}
 	if err := s.saveSnapshot(); err != nil {
 		return err
@@ -670,6 +920,7 @@ func (s *Service) loadVectorStoreState() error {
 }
 
 func (s *Service) Stats() ServiceStats {
+	annStats := s.currentANNIndex().Stats()
 	stats := ServiceStats{
 		SearchRequestsTotal:    s.stats.searchRequestsTotal.Load(),
 		ExactSearchesTotal:     s.stats.exactSearchesTotal.Load(),
@@ -682,6 +933,8 @@ func (s *Service) Stats() ServiceStats {
 		ANNEvalTop1Matches:     s.stats.annEvalTop1Matches.Load(),
 		ANNEvalOverlapResults:  s.stats.annEvalOverlapResults.Load(),
 		ANNEvalComparedResults: s.stats.annEvalComparedResults.Load(),
+		ANNNodes:               annStats.Nodes,
+		ANNDeleted:             annStats.Deleted,
 		ANNProfile:             normalizeANNProfile(s.annProfile),
 		ANNM:                   s.annOptions.M,
 		ANNEfConstruction:      s.annOptions.EfConstruction,
@@ -706,8 +959,18 @@ func (s *Service) Stats() ServiceStats {
 }
 
 func (s *Service) Close() error {
+	syncErr := s.syncPersistence()
 	if closer, ok := s.vectorStore.(interface{ Close() error }); ok {
-		return closer.Close()
+		if err := closer.Close(); err != nil {
+			return err
+		}
+	}
+	return syncErr
+}
+
+func (s *Service) syncPersistence() error {
+	if syncer, ok := s.persistence.(interface{ Sync() error }); ok {
+		return syncer.Sync()
 	}
 	return nil
 }
@@ -748,14 +1011,29 @@ func (s *Service) addANNVector(internalID int, values []float64) error {
 	return s.currentANNIndex().AddVector(internalID, values)
 }
 
+func (s *Service) deleteANNVector(internalID int) {
+	s.currentANNIndex().DeleteVector(internalID)
+}
+
+func (s *Service) maybeCompactANNAfterDeleteLocked() {
+	stats := s.currentANNIndex().Stats()
+	if stats.Deleted < annDeleteRebuildMinDeleted {
+		return
+	}
+	if stats.Nodes == 0 || float64(stats.Deleted)/float64(stats.Nodes) < annDeleteRebuildRatio {
+		return
+	}
+	s.rebuildANNLocked()
+}
+
 func (s *Service) persistenceBackend() PersistenceBackend {
 	if backend, ok := s.persistence.(*snapshotWALBackend); ok {
 		if backend.snapshotPath != s.snapshotPath || backend.walPath != s.walPath {
-			s.persistence = newSnapshotWALBackendWithSecurity(s.snapshotPath, s.walPath, backend.security)
+			s.persistence = newSnapshotWALBackendWithOptions(s.snapshotPath, s.walPath, backend.security, s.syncEvery)
 		}
 	}
 	if s.persistence == nil {
-		return newSnapshotWALBackend(s.snapshotPath, s.walPath)
+		s.persistence = newSnapshotWALBackendWithOptions(s.snapshotPath, s.walPath, DefaultStorageSecurityOptions(), s.syncEvery)
 	}
 	return s.persistence
 }
@@ -770,15 +1048,28 @@ func newDefaultVectorStore(mode, path string, security ...StorageSecurityOptions
 	if len(security) > 0 {
 		storeSecurity = normalizeStorageSecurityOptions(security[0])
 	}
+	return newDefaultVectorStoreWithOptions(mode, path, storeSecurity, 1)
+}
+
+func newDefaultVectorStoreWithOptions(mode, path string, security StorageSecurityOptions, syncEvery int) VectorStore {
+	storeSecurity := normalizeStorageSecurityOptions(security)
+	syncEvery = normalizeSyncEvery(syncEvery)
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "disk", "file":
 		if strings.TrimSpace(path) == "" {
 			path = "./data/vectors"
 		}
-		return newFileVectorStoreWithSecurity(path, storeSecurity)
+		return newFileVectorStoreWithOptions(path, storeSecurity, syncEvery)
 	default:
 		return newMemoryVectorStore()
 	}
+}
+
+func normalizeSyncEvery(syncEvery int) int {
+	if syncEvery <= 0 {
+		return 1
+	}
+	return syncEvery
 }
 
 func storageSecurityOptionsFromStrings(strict bool, dirMode, fileMode string) StorageSecurityOptions {
@@ -861,4 +1152,15 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func maxIntOrOne(value int) int {
+	if value < 1 {
+		return 1
+	}
+	return value
+}
+
+func sqrtDistance(distance float64) float64 {
+	return math.Sqrt(distance)
 }

@@ -92,3 +92,63 @@ func TestHandlerWrappers(t *testing.T) {
 		t.Fatalf("expected 204, got %d", del.Code)
 	}
 }
+
+func TestListVectorsPaginationAndIdsOnly(t *testing.T) {
+	server := testServer(t)
+	handlers := NewHandlers(server)
+
+	// create two vectors
+	create1 := httptest.NewRecorder()
+	createReq1 := httptest.NewRequest(http.MethodPost, "/vectors", bytes.NewBufferString(`{"id":"a","values":[1,2,3]}`))
+	handlers.AddVector(create1, createReq1)
+	if create1.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", create1.Code)
+	}
+
+	create2 := httptest.NewRecorder()
+	createReq2 := httptest.NewRequest(http.MethodPost, "/vectors", bytes.NewBufferString(`{"id":"b","values":[4,5,6]}`))
+	handlers.AddVector(create2, createReq2)
+	if create2.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", create2.Code)
+	}
+
+	// limit=1 should return only one vector
+	list1 := httptest.NewRecorder()
+	listReq1 := httptest.NewRequest(http.MethodGet, "/vectors?limit=1", nil)
+	handlers.ListVectors(list1, listReq1)
+	if list1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", list1.Code)
+	}
+	var payload1 struct {
+		Vectors []struct {
+			ID     string    `json:"id"`
+			Values []float64 `json:"values"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(list1.Body.Bytes(), &payload1); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(payload1.Vectors) != 1 {
+		t.Fatalf("expected 1 vector, got %d", len(payload1.Vectors))
+	}
+
+	// ids_only should return only ids
+	list2 := httptest.NewRecorder()
+	listReq2 := httptest.NewRequest(http.MethodGet, "/vectors?ids_only=true", nil)
+	handlers.ListVectors(list2, listReq2)
+	if list2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", list2.Code)
+	}
+	var payload2 struct {
+		Vectors []map[string]json.RawMessage `json:"vectors"`
+	}
+	if err := json.Unmarshal(list2.Body.Bytes(), &payload2); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(payload2.Vectors) != 2 {
+		t.Fatalf("expected 2 vectors, got %d", len(payload2.Vectors))
+	}
+	if _, ok := payload2.Vectors[0]["values"]; ok {
+		t.Fatalf("ids_only response included values: %s", list2.Body.String())
+	}
+}

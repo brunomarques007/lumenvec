@@ -16,7 +16,6 @@ import (
 	"lumenvec/internal/core"
 	"lumenvec/internal/index"
 
-	"github.com/gorilla/mux"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -150,7 +149,6 @@ func loadBenchmarkVectors(tb testing.TB, svc *core.Service, total, dim int) {
 
 func benchmarkHTTPServer(svc *core.Service) *httptest.Server {
 	server := &Server{
-		router:       mux.NewRouter(),
 		port:         ":0",
 		readTimeout:  5 * time.Second,
 		writeTimeout: 5 * time.Second,

@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	clientpkg "lumenvec/pkg/client"
@@ -33,20 +36,21 @@ func (c *httpLoadClient) Close() error { return nil }
 
 func main() {
 	var (
-		transport = flag.String("transport", "http", "Transport to use: http or grpc")
-		baseURL   = flag.String("base-url", "http://localhost:19190", "HTTP base URL of the LumenVec server")
-		grpcAddr  = flag.String("grpc-addr", "localhost:19191", "gRPC address of the LumenVec server")
-		prefix    = flag.String("prefix", "demo", "Prefix used for generated vector IDs")
-		vectors   = flag.Int("vectors", 500, "Number of vectors to ingest")
-		searches  = flag.Int("searches", 200, "Number of search requests to execute")
-		dim       = flag.Int("dim", 8, "Vector dimension")
-		batchSize = flag.Int("batch-size", 100, "Batch size used for ingest")
-		topK      = flag.Int("k", 5, "Top-k used for searches")
+		transport   = flag.String("transport", "http", "Transport to use: http or grpc")
+		baseURL     = flag.String("base-url", "http://localhost:19190", "HTTP base URL of the LumenVec server")
+		grpcAddr    = flag.String("grpc-addr", "localhost:19191", "gRPC address of the LumenVec server")
+		prefix      = flag.String("prefix", "demo", "Prefix used for generated vector IDs")
+		vectors     = flag.Int("vectors", 500, "Number of vectors to ingest")
+		searches    = flag.Int("searches", 200, "Number of search requests to execute")
+		dim         = flag.Int("dim", 8, "Vector dimension")
+		batchSize   = flag.Int("batch-size", 100, "Batch size used for ingest")
+		topK        = flag.Int("k", 5, "Top-k used for searches")
+		concurrency = flag.Int("concurrency", 1, "Number of concurrent search workers")
 	)
 	flag.Parse()
 
-	if *vectors <= 0 || *searches < 0 || *dim <= 0 || *batchSize <= 0 || *topK <= 0 {
-		fmt.Fprintln(os.Stderr, "vectors, searches, dim, batch-size, and k must be positive")
+	if *vectors <= 0 || *searches < 0 || *dim <= 0 || *batchSize <= 0 || *topK <= 0 || *concurrency <= 0 {
+		fmt.Fprintln(os.Stderr, "vectors, searches, dim, batch-size, k, and concurrency must be positive")
 		os.Exit(1)
 	}
 
@@ -65,16 +69,19 @@ func main() {
 	}
 
 	if *searches > 0 {
-		fmt.Printf("Running %d search requests with k=%d via %s\n", *searches, *topK, *transport)
-		stats, err := runSearches(client, namespace, *vectors, *searches, *dim, *topK)
+		fmt.Printf("Running %d search requests with k=%d concurrency=%d via %s\n", *searches, *topK, *concurrency, *transport)
+		stats, err := runSearches(client, namespace, *vectors, *searches, *dim, *topK, *concurrency)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "search load failed: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("Search summary: count=%d avg_ms=%.2f max_ms=%.2f sample_top1=%s\n",
+		fmt.Printf("Search summary: count=%d avg_ms=%.2f p50_ms=%.2f p95_ms=%.2f p99_ms=%.2f max_ms=%.2f sample_top1=%s\n",
 			stats.count,
 			stats.total.Seconds()*1000/float64(stats.count),
+			stats.p50.Seconds()*1000,
+			stats.p95.Seconds()*1000,
+			stats.p99.Seconds()*1000,
 			stats.max.Seconds()*1000,
 			stats.sampleTop1,
 		)
@@ -121,32 +128,90 @@ type searchStats struct {
 	count      int
 	total      time.Duration
 	max        time.Duration
+	p50        time.Duration
+	p95        time.Duration
+	p99        time.Duration
 	sampleTop1 string
 }
 
-func runSearches(client vectorClient, namespace float64, totalVectors, searches, dim, topK int) (searchStats, error) {
+func runSearches(client vectorClient, namespace float64, totalVectors, searches, dim, topK, concurrency int) (searchStats, error) {
+	latencies := make([]time.Duration, searches)
+	errCh := make(chan error, 1)
+	var next atomic.Int64
+	var sampleTop1 atomic.Value
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= searches {
+					return
+				}
+				target := i % totalVectors
+				query := perturbVector(generatedVector(namespace, target, dim), i)
+
+				start := time.Now()
+				results, err := client.SearchVector(query, topK)
+				elapsed := time.Since(start)
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("search %d: %w", i, err):
+					default:
+					}
+					return
+				}
+
+				latencies[i] = elapsed
+				if i == 0 && len(results) > 0 {
+					sampleTop1.Store(results[0].ID)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return searchStats{}, err
+	default:
+	}
+
 	var stats searchStats
-	for i := 0; i < searches; i++ {
-		target := i % totalVectors
-		query := perturbVector(generatedVector(namespace, target, dim), i)
-
-		start := time.Now()
-		results, err := client.SearchVector(query, topK)
-		elapsed := time.Since(start)
-		if err != nil {
-			return searchStats{}, fmt.Errorf("search %d: %w", i, err)
-		}
-
-		stats.count++
+	for _, elapsed := range latencies {
 		stats.total += elapsed
 		if elapsed > stats.max {
 			stats.max = elapsed
 		}
-		if i == 0 && len(results) > 0 {
-			stats.sampleTop1 = results[0].ID
-		}
+	}
+	stats.count = searches
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	stats.p50 = percentileDuration(latencies, 50)
+	stats.p95 = percentileDuration(latencies, 95)
+	stats.p99 = percentileDuration(latencies, 99)
+	if value, ok := sampleTop1.Load().(string); ok {
+		stats.sampleTop1 = value
 	}
 	return stats, nil
+}
+
+func percentileDuration(values []time.Duration, percentile int) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	if percentile <= 0 {
+		return values[0]
+	}
+	if percentile >= 100 {
+		return values[len(values)-1]
+	}
+	idx := (len(values)*percentile + 99) / 100
+	if idx < 1 {
+		idx = 1
+	}
+	return values[idx-1]
 }
 
 func generatedVector(namespace float64, seed, dim int) []float64 {

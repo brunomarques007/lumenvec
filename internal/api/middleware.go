@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -25,41 +24,61 @@ func (r *statusRecorder) WriteHeader(status int) {
 }
 
 type rateLimiter struct {
-	mu     sync.Mutex
-	hits   map[string][]time.Time
-	limit  int
-	window time.Duration
+	mu      sync.Mutex
+	buckets map[string]tokenBucket
+	limit   float64
+	window  time.Duration
+	burst   float64
+}
+
+type tokenBucket struct {
+	tokens float64
+	last   time.Time
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	if limit <= 0 {
+		return nil
+	}
 	return &rateLimiter{
-		hits:   make(map[string][]time.Time),
-		limit:  limit,
-		window: window,
+		buckets: make(map[string]tokenBucket),
+		limit:   float64(limit),
+		window:  window,
+		burst:   float64(limit),
 	}
 }
 
 func (rl *rateLimiter) allow(key string) bool {
 	now := time.Now()
-	cutoff := now.Add(-rl.window)
 
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	events := rl.hits[key]
-	filtered := events[:0]
-	for _, t := range events {
-		if t.After(cutoff) {
-			filtered = append(filtered, t)
+	bucket, ok := rl.buckets[key]
+	if !ok {
+		rl.buckets[key] = tokenBucket{
+			tokens: rl.burst - 1,
+			last:   now,
 		}
+		return true
 	}
 
-	if len(filtered) >= rl.limit {
-		rl.hits[key] = filtered
+	elapsed := now.Sub(bucket.last)
+	if elapsed > 0 {
+		bucket.tokens += elapsed.Seconds() * (rl.limit / rl.window.Seconds())
+		if bucket.tokens > rl.burst {
+			bucket.tokens = rl.burst
+		}
+		bucket.last = now
+	}
+
+	if bucket.tokens < 1 {
+		rl.buckets[key] = bucket
 		return false
 	}
 
-	rl.hits[key] = append(filtered, now)
+	bucket.tokens--
+	rl.buckets[key] = bucket
 	return true
 }
 
@@ -138,11 +157,14 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
+	if !s.accessLog {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		log.Printf(`{"event":"http_request","method":"%s","path":"%s","status":%d,"duration_ms":%d}`,
+		logPrintfAPI(`{"event":"http_request","method":"%s","path":"%s","status":%d,"duration_ms":%d}`,
 			r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds())
 	})
 }

@@ -32,5 +32,4 @@ Thumbs.db
 # Docker overrides
 docker-compose.override.yml
 
-.gitignore exists in current directory. Continue?
-[backup (b) / overwrite (o) / cancel (c)] 
+deep-research-report.md

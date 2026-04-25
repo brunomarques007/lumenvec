@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -43,6 +44,24 @@ func TestApplyDefaults(t *testing.T) {
 	}
 	if opts.ANNM != 16 || opts.ANNEfConstruct != 64 || opts.ANNEfSearch != 64 {
 		t.Fatal("unexpected ann defaults")
+	}
+
+	opts = applyDefaults(ServerOptions{
+		Protocol:          "grpc",
+		Port:              "2000",
+		GRPCPort:          "2001",
+		DisableRateLimit:  true,
+		SearchMode:        "ANN",
+		ANNEvalSampleRate: -1,
+		CacheMaxItems:     -1,
+		CacheMaxBytes:     -1,
+		CacheTTL:          -1,
+	})
+	if opts.Port != ":2000" || opts.GRPCPort != ":2001" || !opts.GRPCEnabled || opts.RateLimitRPS != 0 {
+		t.Fatalf("unexpected explicit defaults: %+v", opts)
+	}
+	if opts.SearchMode != "ann" || opts.ANNEvalSampleRate != 0 || opts.CacheMaxItems != 1024 || opts.CacheMaxBytes != 8<<20 || opts.CacheTTL != 15*time.Minute {
+		t.Fatalf("unexpected normalized defaults: %+v", opts)
 	}
 }
 
@@ -150,8 +169,13 @@ func TestServerValidationErrors(t *testing.T) {
 	}{
 		{http.MethodPost, "/vectors", "{", http.StatusBadRequest},
 		{http.MethodPost, "/vectors", `{"id":"","values":[1]}`, http.StatusBadRequest},
+		{http.MethodPost, "/vectors", `{"id":"too-wide","values":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]}`, http.StatusBadRequest},
+		{http.MethodPost, "/vectors/batch", "{", http.StatusBadRequest},
+		{http.MethodPost, "/vectors/batch", `{"vectors":[{"id":"bad","values":[]}]}`, http.StatusBadRequest},
 		{http.MethodPost, "/vectors/search", `{"values":[],"k":1}`, http.StatusBadRequest},
 		{http.MethodPost, "/vectors/search/batch", "{", http.StatusBadRequest},
+		{http.MethodPost, "/vectors/search/batch", `{"queries":[]}`, http.StatusBadRequest},
+		{http.MethodPost, "/vectors/search/batch", `{"queries":[{"id":"q","values":[1],"k":0}]}`, http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -179,6 +203,18 @@ func TestHealthRouterAndStatusMapping(t *testing.T) {
 
 	if got := statusFromServiceError(core.ErrInvalidValues); got != http.StatusBadRequest {
 		t.Fatalf("unexpected status %d", got)
+	}
+	if got := statusFromServiceError(core.ErrInvalidID); got != http.StatusBadRequest {
+		t.Fatalf("unexpected invalid id status %d", got)
+	}
+	if got := statusFromServiceError(core.ErrInvalidK); got != http.StatusBadRequest {
+		t.Fatalf("unexpected invalid k status %d", got)
+	}
+	if got := statusFromServiceError(core.ErrVectorDimTooHigh); got != http.StatusBadRequest {
+		t.Fatalf("unexpected dim status %d", got)
+	}
+	if got := statusFromServiceError(core.ErrKTooHigh); got != http.StatusBadRequest {
+		t.Fatalf("unexpected max k status %d", got)
 	}
 	if got := statusFromServiceError(errors.New("x")); got != http.StatusInternalServerError {
 		t.Fatalf("unexpected status %d", got)
@@ -296,6 +332,34 @@ func TestServerStartFailsWhenGRPCBindFails(t *testing.T) {
 	}
 }
 
+func TestServerStartFailsWhenGRPCServeFails(t *testing.T) {
+	server := newAPITestServer(t)
+	server.protocol = "grpc"
+	server.grpcEnabled = true
+
+	oldFatal := logFatalfAPI
+	oldPrintf := logPrintfAPI
+	oldGRPCListen := grpcListenFunc
+	oldGRPCServe := grpcServeFunc
+	t.Cleanup(func() {
+		logFatalfAPI = oldFatal
+		logPrintfAPI = oldPrintf
+		grpcListenFunc = oldGRPCListen
+		grpcServeFunc = oldGRPCServe
+	})
+
+	var fatalCalled bool
+	logPrintfAPI = func(string, ...interface{}) {}
+	logFatalfAPI = func(string, ...interface{}) { fatalCalled = true }
+	grpcListenFunc = func(string, string) (net.Listener, error) { return newStubListener(), nil }
+	grpcServeFunc = func(*grpc.Server, net.Listener) error { return errors.New("serve failed") }
+
+	server.Start()
+	if !fatalCalled {
+		t.Fatal("expected grpc serve failure to trigger fatal path")
+	}
+}
+
 func TestServerStartWithHTTPSTLS(t *testing.T) {
 	server := newAPITestServer(t)
 	server.tlsEnabled = true
@@ -338,6 +402,27 @@ func TestServerHandlerErrorBranches(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/vectors", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/vectors/dup", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/vectors/", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/vectors", bytes.NewBufferString(`{"id":"dup","values":[1,2,3]}`))
 	server.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
@@ -363,6 +448,71 @@ func TestServerHandlerErrorBranches(t *testing.T) {
 	server.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	writeJSON(rec, http.StatusAccepted, map[string]string{"ok": "true"})
+	if rec.Code != http.StatusAccepted || rec.Header().Get("Content-Type") != contentTypeJSON {
+		t.Fatalf("expected explicit json status/header, got %d %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestListVectorsPaginationInputs(t *testing.T) {
+	server := newAPITestServer(t)
+	for _, id := range []string{"a", "b", "c"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/vectors", bytes.NewBufferString(`{"id":"`+id+`","values":[1]}`))
+		server.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("add %s code = %d", id, rec.Code)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/vectors?limit=999999&ids_only=yes", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected capped list success, got %d", rec.Code)
+	}
+
+	cursor := encodeListVectorsCursor("a")
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/vectors?cursor="+cursor+"&ids_only=1", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected cursor list success, got %d", rec.Code)
+	}
+
+	paddedCursor := base64.URLEncoding.EncodeToString([]byte("a"))
+	if decoded, err := decodeListVectorsCursor(paddedCursor); err != nil || decoded != "a" {
+		t.Fatalf("decode padded cursor = %q, %v", decoded, err)
+	}
+
+	for _, query := range []string{"limit=bad", "limit=0", "cursor=!"} {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/vectors?"+query, nil)
+		server.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d", query, rec.Code)
+		}
+	}
+}
+
+func TestTrustedProxyParsingAndChecks(t *testing.T) {
+	parsed := parseTrustedProxies([]string{"", "bad", "10.0.0.1", "192.168.0.0/24"})
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 trusted proxy entries, got %d", len(parsed))
+	}
+	server := newAPITestServer(t)
+	server.trustedCIDRs = parsed
+	if !server.isTrustedProxy("10.0.0.1:1234") {
+		t.Fatal("expected host:port proxy to be trusted")
+	}
+	if !server.isTrustedProxy("192.168.0.44") {
+		t.Fatal("expected raw proxy address to be trusted")
+	}
+	if server.isTrustedProxy("not an ip") {
+		t.Fatal("did not expect invalid remote address to be trusted")
 	}
 }
 

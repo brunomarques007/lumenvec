@@ -33,6 +33,9 @@ func TestLoadDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.Security.Storage.DirMode != "0755" || cfg.Security.Storage.FileMode != "0644" {
 		t.Fatal("expected relaxed development file modes")
 	}
+	if cfg.Database.SyncEvery != 1 {
+		t.Fatal("expected default sync_every")
+	}
 }
 
 func TestLoadFromFileAndEnv(t *testing.T) {
@@ -51,6 +54,7 @@ database:
   snapshot_every: 12
   vector_store: "disk"
   vector_path: "./vectors"
+  sync_every: 16
   cache_enabled: true
   cache_max_bytes: 2048
   cache_max_items: 321
@@ -118,6 +122,9 @@ security:
 	if cfg.Database.VectorStore != "disk" || cfg.Database.VectorPath != "./vectors" {
 		t.Fatal("expected vector store config from yaml")
 	}
+	if cfg.Database.SyncEvery != 16 {
+		t.Fatal("expected sync_every config from yaml")
+	}
 	if !cfg.Database.CacheEnabled || cfg.Database.CacheMaxBytes != 2048 || cfg.Database.CacheMaxItems != 321 || cfg.Database.CacheTTL != "30s" {
 		t.Fatal("expected cache config from yaml")
 	}
@@ -142,6 +149,9 @@ func TestParseDuration(t *testing.T) {
 	if got := ParseDuration("5s", time.Second); got != 5*time.Second {
 		t.Fatalf("ParseDuration() = %v", got)
 	}
+	if got := ParseDuration("  ", time.Second); got != time.Second {
+		t.Fatalf("ParseDuration() empty fallback = %v", got)
+	}
 	if got := ParseDuration("bad", time.Second); got != time.Second {
 		t.Fatalf("ParseDuration() fallback = %v", got)
 	}
@@ -159,20 +169,47 @@ func TestLoadInvalidYAML(t *testing.T) {
 
 func TestOverrideFromEnvIgnoresInvalidNumericValues(t *testing.T) {
 	cfg := defaultConfig()
+	t.Setenv("VECTOR_DB_ACCESS_LOG", "not-bool")
+	t.Setenv("VECTOR_DB_METRICS_ENABLED", "not-bool")
 	t.Setenv("VECTOR_DB_RATE_LIMIT_RPS", "bad")
 	t.Setenv("VECTOR_DB_SNAPSHOT_EVERY", "-1")
+	t.Setenv("VECTOR_DB_SYNC_EVERY", "0")
+	t.Setenv("VECTOR_DB_CACHE_ENABLED", "not-bool")
+	t.Setenv("VECTOR_DB_CACHE_MAX_BYTES", "0")
+	t.Setenv("VECTOR_DB_CACHE_MAX_ITEMS", "bad")
 	t.Setenv("VECTOR_DB_MAX_BODY_BYTES", "bad")
 	t.Setenv("VECTOR_DB_MAX_VECTOR_DIM", "bad")
 	t.Setenv("VECTOR_DB_MAX_K", "bad")
+	t.Setenv("VECTOR_DB_ANN_M", "bad")
+	t.Setenv("VECTOR_DB_ANN_EF_CONSTRUCTION", "0")
+	t.Setenv("VECTOR_DB_ANN_EF_SEARCH", "-1")
+	t.Setenv("VECTOR_DB_ANN_EVAL_SAMPLE_RATE", "-1")
+	t.Setenv("VECTOR_DB_GRPC_ENABLED", "not-bool")
+	t.Setenv("VECTOR_DB_SECURITY_AUTH_ENABLED", "not-bool")
+	t.Setenv("VECTOR_DB_SECURITY_GRPC_AUTH_ENABLED", "not-bool")
+	t.Setenv("VECTOR_DB_TLS_ENABLED", "not-bool")
+	t.Setenv("VECTOR_DB_TRUST_FORWARDED_FOR", "not-bool")
+	t.Setenv("VECTOR_DB_STRICT_FILE_PERMISSIONS", "not-bool")
 	overrideFromEnv(&cfg)
-	if cfg.Server.RateLimitRPS != 100 || cfg.Database.SnapshotEvery != 25 || cfg.Limits.MaxK != 100 {
+	if cfg.Server.AccessLog || !cfg.Server.Metrics || cfg.Server.RateLimitRPS != 100 {
+		t.Fatal("expected invalid server env values to be ignored")
+	}
+	if cfg.Database.SnapshotEvery != 25 || cfg.Database.SyncEvery != 1 || cfg.Database.CacheEnabled || cfg.Database.CacheMaxBytes != 8<<20 || cfg.Database.CacheMaxItems != 1024 {
+		t.Fatal("expected invalid database env values to be ignored")
+	}
+	if cfg.Limits.MaxK != 100 || cfg.Search.ANNM != 16 || cfg.Search.ANNEfConstruct != 64 || cfg.Search.ANNEfSearch != 64 || cfg.Search.ANNEvalSampleRate != 0 {
 		t.Fatal("expected invalid env values to be ignored")
+	}
+	if cfg.GRPC.Enabled || cfg.Security.Auth.Enabled || cfg.Security.Auth.GRPCEnabled || cfg.Security.Transport.TLSEnabled || cfg.Security.Proxy.TrustForwardedFor || cfg.Security.Storage.StrictFilePermissions {
+		t.Fatal("expected invalid bool env values to be ignored")
 	}
 }
 
 func TestOverrideFromEnvValidValues(t *testing.T) {
 	cfg := defaultConfig()
 	t.Setenv("VECTOR_DB_READ_TIMEOUT", "9s")
+	t.Setenv("VECTOR_DB_ACCESS_LOG", "true")
+	t.Setenv("VECTOR_DB_METRICS_ENABLED", "false")
 	t.Setenv("VECTOR_DB_PROTOCOL", "grpc")
 	t.Setenv("VECTOR_DB_WRITE_TIMEOUT", "11s")
 	t.Setenv("VECTOR_DB_RATE_LIMIT_RPS", "50")
@@ -194,6 +231,7 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	t.Setenv("VECTOR_DB_CACHE_TTL", "45s")
 	t.Setenv("VECTOR_DB_VECTOR_STORE", "disk")
 	t.Setenv("VECTOR_DB_VECTOR_PATH", "/tmp/vectors")
+	t.Setenv("VECTOR_DB_SYNC_EVERY", "32")
 	t.Setenv("VECTOR_DB_GRPC_ENABLED", "true")
 	t.Setenv("VECTOR_DB_GRPC_PORT", "22000")
 	t.Setenv("VECTOR_DB_SECURITY_PROFILE", "production")
@@ -216,13 +254,16 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	if cfg.Server.ReadTimeout != "9s" || cfg.Server.WriteTimeout != "11s" {
 		t.Fatal("expected timeout overrides")
 	}
+	if !cfg.Server.AccessLog || cfg.Server.Metrics {
+		t.Fatal("expected server boolean overrides")
+	}
 	if cfg.Server.RateLimitRPS != 50 || cfg.Database.SnapshotEvery != 30 {
 		t.Fatal("expected numeric overrides")
 	}
 	if cfg.Database.SnapshotPath != "/tmp/snap" || cfg.Database.WALPath != "/tmp/wal" {
 		t.Fatal("expected path overrides")
 	}
-	if cfg.Database.VectorStore != "disk" || cfg.Database.VectorPath != "/tmp/vectors" {
+	if cfg.Database.VectorStore != "disk" || cfg.Database.VectorPath != "/tmp/vectors" || cfg.Database.SyncEvery != 32 {
 		t.Fatal("expected vector store overrides")
 	}
 	if !cfg.Database.CacheEnabled || cfg.Database.CacheMaxBytes != 4096 || cfg.Database.CacheMaxItems != 222 || cfg.Database.CacheTTL != "45s" {
@@ -257,6 +298,15 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	}
 	if !cfg.Security.Storage.StrictFilePermissions || cfg.Security.Storage.DirMode != "0700" || cfg.Security.Storage.FileMode != "0600" {
 		t.Fatal("expected storage overrides")
+	}
+}
+
+func TestOverrideFromEnvAllowsDisablingRateLimit(t *testing.T) {
+	cfg := defaultConfig()
+	t.Setenv("VECTOR_DB_RATE_LIMIT_RPS", "0")
+	overrideFromEnv(&cfg)
+	if cfg.Server.RateLimitRPS != 0 {
+		t.Fatalf("expected rate limit to be disabled, got %d", cfg.Server.RateLimitRPS)
 	}
 }
 
@@ -314,5 +364,39 @@ func TestSecurityProfileDefaults(t *testing.T) {
 	applySecurityDefaults(&cfg)
 	if !cfg.Security.Auth.Enabled || !cfg.Security.Auth.GRPCEnabled || cfg.Security.Auth.APIKey != "legacy-secret" {
 		t.Fatal("expected legacy server api key to propagate into security auth")
+	}
+
+	cfg = defaultConfig()
+	cfg.Security.Auth.GRPCEnabled = true
+	cfg.Security.Storage.DirMode = ""
+	cfg.Security.Storage.FileMode = ""
+	applySecurityDefaults(&cfg)
+	if cfg.Security.Auth.GRPCEnabled {
+		t.Fatal("expected grpc auth disabled when auth is disabled in development")
+	}
+	if cfg.Security.Storage.DirMode != "0755" || cfg.Security.Storage.FileMode != "0644" {
+		t.Fatal("expected development storage defaults for empty modes")
+	}
+}
+
+func TestProductionSecurityDefaultsWithoutTrustedProxies(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Security.Profile = "production"
+	cfg.Security.Auth.APIKey = "secret"
+	cfg.Security.Proxy.TrustForwardedFor = true
+	cfg.Security.Proxy.TrustedProxies = nil
+	cfg.Security.Storage.DirMode = ""
+	cfg.Security.Storage.FileMode = ""
+
+	applySecurityDefaults(&cfg)
+
+	if !cfg.Security.Auth.Enabled || !cfg.Security.Auth.GRPCEnabled {
+		t.Fatal("expected auth enabled from production api key")
+	}
+	if cfg.Security.Proxy.TrustForwardedFor {
+		t.Fatal("expected forwarded-for trust disabled without trusted proxies")
+	}
+	if cfg.Security.Storage.DirMode != "0700" || cfg.Security.Storage.FileMode != "0600" {
+		t.Fatal("expected strict production defaults for empty modes")
 	}
 }
