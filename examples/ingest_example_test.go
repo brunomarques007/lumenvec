@@ -14,6 +14,10 @@ func TestRun(t *testing.T) {
 	mux.HandleFunc("/vectors/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 	})
+	mux.HandleFunc("/vectors/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"doc-1","distance":0.1},{"id":"doc-2","distance":0.2}]`))
+	})
 	mux.HandleFunc("/vectors/search/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"query-0","results":[{"id":"doc-1","distance":0.1},{"id":"doc-2","distance":0.2}]}]`))
@@ -59,6 +63,10 @@ func TestRunWriteFailures(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/vectors/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("/vectors/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"doc-1","distance":0.1}]`))
 	})
 	mux.HandleFunc("/vectors/search/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
