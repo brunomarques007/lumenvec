@@ -4,10 +4,10 @@
 
 LumenVec is organized around a shared Go-native core service with two transport layers:
 
-- HTTP for simple operational access and broad compatibility
-- gRPC for lower-overhead service-to-service and batch-oriented traffic
+- HTTP as the default transport for simple operational access and broad compatibility
+- gRPC as the lower-overhead option for service-to-service and batch-oriented traffic
 
-Both transports call the same `core.Service`, so validation, persistence, cache behavior, and search semantics stay aligned. A single process runs exactly one transport, selected by configuration.
+Both transports call the same `core.Service`, so validation, persistence, cache behavior, and search semantics stay aligned. A single process runs exactly one transport, selected by configuration. The intended product posture is HTTP by default, with gRPC used when transport overhead becomes a meaningful part of end-to-end latency.
 
 ## Main Components
 

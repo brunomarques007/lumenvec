@@ -2,211 +2,266 @@ package client
 
 import (
 	"context"
-	"net"
-	"path/filepath"
+	"errors"
 	"testing"
+	"time"
 
 	lumenvecpb "lumenvec/api/proto"
-	"lumenvec/internal/core"
-	"lumenvec/internal/index"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 )
 
-type testVectorService struct {
-	lumenvecpb.UnimplementedVectorServiceServer
-	service *core.Service
-}
+type fakeVecService struct{}
 
-func (s *testVectorService) Health(context.Context, *lumenvecpb.HealthRequest) (*lumenvecpb.HealthResponse, error) {
+func (f *fakeVecService) Health(ctx context.Context, in *lumenvecpb.HealthRequest, opts ...grpc.CallOption) (*lumenvecpb.HealthResponse, error) {
 	return &lumenvecpb.HealthResponse{Status: "ok"}, nil
 }
-
-func (s *testVectorService) AddVector(_ context.Context, req *lumenvecpb.AddVectorRequest) (*lumenvecpb.AddVectorResponse, error) {
-	if err := s.service.AddVector(req.GetId(), req.GetValues()); err != nil {
-		return nil, err
-	}
+func (f *fakeVecService) ListVectors(ctx context.Context, in *lumenvecpb.ListVectorsRequest, opts ...grpc.CallOption) (*lumenvecpb.ListVectorsResponse, error) {
+	return &lumenvecpb.ListVectorsResponse{Vectors: []*lumenvecpb.Vector{{Id: "x", Values: []float64{1}}}}, nil
+}
+func (f *fakeVecService) AddVector(ctx context.Context, in *lumenvecpb.AddVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.AddVectorResponse, error) {
 	return &lumenvecpb.AddVectorResponse{Success: true}, nil
 }
-
-func (s *testVectorService) AddVectorsBatch(_ context.Context, req *lumenvecpb.AddVectorsBatchRequest) (*lumenvecpb.AddVectorsBatchResponse, error) {
-	vectors := make([]index.Vector, 0, len(req.GetVectors()))
-	for _, vec := range req.GetVectors() {
-		vectors = append(vectors, index.Vector{ID: vec.GetId(), Values: vec.GetValues()})
-	}
-	if err := s.service.AddVectors(vectors); err != nil {
-		return nil, err
-	}
+func (f *fakeVecService) AddVectorsBatch(ctx context.Context, in *lumenvecpb.AddVectorsBatchRequest, opts ...grpc.CallOption) (*lumenvecpb.AddVectorsBatchResponse, error) {
 	return &lumenvecpb.AddVectorsBatchResponse{Success: true}, nil
 }
-
-func (s *testVectorService) GetVector(_ context.Context, req *lumenvecpb.GetVectorRequest) (*lumenvecpb.GetVectorResponse, error) {
-	vec, err := s.service.GetVector(req.GetId())
-	if err != nil {
-		return nil, err
-	}
-	return &lumenvecpb.GetVectorResponse{Vector: &lumenvecpb.Vector{Id: vec.ID, Values: vec.Values}}, nil
+func (f *fakeVecService) GetVector(ctx context.Context, in *lumenvecpb.GetVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.GetVectorResponse, error) {
+	return &lumenvecpb.GetVectorResponse{Vector: &lumenvecpb.Vector{Id: in.GetId(), Values: []float64{2}}}, nil
 }
-
-func (s *testVectorService) Search(_ context.Context, req *lumenvecpb.SearchRequest) (*lumenvecpb.SearchResponse, error) {
-	results, err := s.service.Search(req.GetValues(), int(req.GetTopK()))
-	if err != nil {
-		return nil, err
-	}
-	return &lumenvecpb.SearchResponse{Results: toProtoResults(results)}, nil
+func (f *fakeVecService) Search(ctx context.Context, in *lumenvecpb.SearchRequest, opts ...grpc.CallOption) (*lumenvecpb.SearchResponse, error) {
+	return &lumenvecpb.SearchResponse{Results: []*lumenvecpb.SearchResult{{Id: "x", Distance: 0.5}}}, nil
 }
-
-func (s *testVectorService) SearchBatch(_ context.Context, req *lumenvecpb.SearchBatchRequest) (*lumenvecpb.SearchBatchResponse, error) {
-	queries := make([]core.BatchSearchQuery, 0, len(req.GetQueries()))
-	for _, query := range req.GetQueries() {
-		queries = append(queries, core.BatchSearchQuery{
-			ID:     query.GetId(),
-			Values: query.GetValues(),
-			K:      int(query.GetTopK()),
-		})
-	}
-	results, err := s.service.SearchBatch(queries)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*lumenvecpb.SearchBatchResult, 0, len(results))
-	for _, result := range results {
-		out = append(out, &lumenvecpb.SearchBatchResult{Id: result.ID, Results: toProtoResults(result.Results)})
-	}
-	return &lumenvecpb.SearchBatchResponse{Results: out}, nil
+func (f *fakeVecService) SearchBatch(ctx context.Context, in *lumenvecpb.SearchBatchRequest, opts ...grpc.CallOption) (*lumenvecpb.SearchBatchResponse, error) {
+	return &lumenvecpb.SearchBatchResponse{Results: []*lumenvecpb.SearchBatchResult{{Id: "q1", Results: []*lumenvecpb.SearchResult{{Id: "x", Distance: 0.5}}}}}, nil
 }
-
-func (s *testVectorService) DeleteVector(_ context.Context, req *lumenvecpb.DeleteVectorRequest) (*lumenvecpb.DeleteVectorResponse, error) {
-	if err := s.service.DeleteVector(req.GetId()); err != nil {
-		return nil, err
-	}
+func (f *fakeVecService) DeleteVector(ctx context.Context, in *lumenvecpb.DeleteVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.DeleteVectorResponse, error) {
 	return &lumenvecpb.DeleteVectorResponse{Success: true}, nil
 }
 
-func toProtoResults(results []core.SearchResult) []*lumenvecpb.SearchResult {
-	out := make([]*lumenvecpb.SearchResult, 0, len(results))
-	for _, result := range results {
-		out = append(out, &lumenvecpb.SearchResult{Id: result.ID, Distance: result.Distance})
+func TestGRPCClientMappings(t *testing.T) {
+	c := &GRPCVectorClient{client: &fakeVecService{}, timeout: time.Second}
+
+	// Health
+	h, err := c.Health()
+	if err != nil || h != "ok" {
+		t.Fatalf("unexpected health: %v %v", h, err)
 	}
-	return out
-}
 
-func TestGRPCVectorClientLifecycle(t *testing.T) {
-	base := t.TempDir()
-	svc := core.NewService(core.ServiceOptions{
-		MaxVectorDim:  16,
-		MaxK:          5,
-		SnapshotPath:  filepath.Join(base, "snapshot.json"),
-		WALPath:       filepath.Join(base, "wal.log"),
-		SnapshotEvery: 2,
-		SearchMode:    "ann",
-	})
+	// ListVectors
+	vecs, err := c.ListVectors()
+	if err != nil || len(vecs) != 1 || vecs[0].ID != "x" {
+		t.Fatalf("unexpected list vectors: %v %v", vecs, err)
+	}
 
-	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	lumenvecpb.RegisterVectorServiceServer(server, &testVectorService{service: svc})
-	defer server.Stop()
-	go func() {
-		_ = server.Serve(listener)
-	}()
+	// GetVector
+	got, err := c.GetVector("y")
+	if err != nil || got == nil || got.ID != "y" {
+		t.Fatalf("unexpected get vector: %v %v", got, err)
+	}
 
-	client, err := NewGRPCVectorClientWithDialer("passthrough:///bufnet", []grpc.DialOption{
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return listener.Dial()
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	})
+	// SearchVector
+	sr, err := c.SearchVector([]float64{1}, 1)
+	if err != nil || len(sr) != 1 || sr[0].ID != "x" {
+		t.Fatalf("unexpected search vector: %v %v", sr, err)
+	}
+
+	// SearchVectors (batch)
+	_, err = c.SearchVectors([]BatchSearchQuery{{ID: "q1", Values: []float64{1}, K: 1}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error from SearchVectors: %v", err)
 	}
-	defer func() { _ = client.Close() }()
 
-	health, err := client.Health()
-	if err != nil || health != "ok" {
-		t.Fatal("expected grpc health")
+	// AddVectors
+	if err := c.AddVectors([]VectorPayload{{ID: "a", Values: []float64{1}}}); err != nil {
+		t.Fatalf("unexpected add vectors error: %v", err)
 	}
-	if err := client.AddVectorWithID("doc-1", []float64{1, 2, 3}); err != nil {
-		t.Fatal(err)
+	// DeleteVector
+	if err := c.DeleteVector("x"); err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
 	}
-	vec, err := client.GetVector("doc-1")
-	if err != nil || vec == nil || vec.ID != "doc-1" {
-		t.Fatal("expected grpc get vector")
+
+	// Close when conn nil should not error
+	if err := c.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
 	}
-	results, err := client.SearchVector([]float64{1, 2, 3.1}, 1)
-	if err != nil || len(results) != 1 || results[0].ID != "doc-1" {
-		t.Fatal("expected grpc search result")
-	}
-	batch, err := client.SearchVectors([]BatchSearchQuery{{ID: "q1", Values: []float64{1, 2, 3.1}, K: 1}})
-	if err != nil || len(batch) != 1 || batch[0].ID != "q1" {
-		t.Fatal("expected grpc batch search result")
-	}
-	if err := client.DeleteVector("doc-1"); err != nil {
-		t.Fatal(err)
-	}
+
 }
 
-func TestGRPCVectorClientConstructorsAndBatchPaths(t *testing.T) {
-	base := t.TempDir()
-	svc := core.NewService(core.ServiceOptions{
-		MaxVectorDim:  16,
-		MaxK:          5,
-		SnapshotPath:  filepath.Join(base, "snapshot.json"),
-		WALPath:       filepath.Join(base, "wal.log"),
-		SnapshotEvery: 2,
-		SearchMode:    "ann",
-	})
-
-	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	lumenvecpb.RegisterVectorServiceServer(server, &testVectorService{service: svc})
-	defer server.Stop()
-	go func() { _ = server.Serve(listener) }()
-
-	client, err := NewGRPCVectorClient("passthrough:///bufnet")
-	if err == nil {
-		_ = client.Close()
-	}
-
-	client, err = NewGRPCVectorClientWithDialer("passthrough:///bufnet", []grpc.DialOption{
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = client.Close() }()
-
-	if err := client.AddVector([]float64{1, 2, 3}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.AddVectors([]VectorPayload{{ID: "doc-2", Values: []float64{2, 3, 4}}}); err != nil {
-		t.Fatal(err)
-	}
-	results, err := client.SearchVectors([]BatchSearchQuery{{ID: "q1", Values: []float64{2, 3, 4}, K: 1}})
-	if err != nil || len(results) != 1 {
-		t.Fatal("expected grpc batch search result")
-	}
-}
-
-func TestGRPCVectorClientNilAndConversionHelpers(t *testing.T) {
-	if err := (&GRPCVectorClient{}).Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	out := fromProtoSearchResults([]*lumenvecpb.SearchResult{{Id: "a", Distance: 0.1}})
-	if len(out) != 1 || out[0].ID != "a" {
-		t.Fatal("expected proto conversion")
-	}
-}
-
-func TestGRPCVectorClientDefaultConstructor(t *testing.T) {
+func TestGRPCClientConstructorsAndAddVector(t *testing.T) {
 	client, err := NewGRPCVectorClient("dns:///localhost:19191")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewGRPCVectorClient() error = %v", err)
+	}
+	if client.timeout != 10*time.Second {
+		t.Fatalf("timeout = %v, want 10s", client.timeout)
 	}
 	if err := client.Close(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Close() error = %v", err)
 	}
+
+	client, err = NewGRPCVectorClientWithDialer("dns:///localhost:19191", []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	})
+	if err != nil {
+		t.Fatalf("NewGRPCVectorClientWithDialer() error = %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	c := &GRPCVectorClient{client: &fakeVecService{}, timeout: time.Second}
+	if err := c.AddVector([]float64{1, 2, 3}); err != nil {
+		t.Fatalf("AddVector() error = %v", err)
+	}
+	if err := c.AddVectorWithID("doc-1", []float64{1, 2, 3}); err != nil {
+		t.Fatalf("AddVectorWithID() error = %v", err)
+	}
+}
+
+type nilVecService struct {
+	fakeVecService
+}
+
+func (f *nilVecService) ListVectors(ctx context.Context, in *lumenvecpb.ListVectorsRequest, opts ...grpc.CallOption) (*lumenvecpb.ListVectorsResponse, error) {
+	return &lumenvecpb.ListVectorsResponse{Vectors: []*lumenvecpb.Vector{nil, {Id: "kept", Values: []float64{4}}}}, nil
+}
+
+func (f *nilVecService) GetVector(ctx context.Context, in *lumenvecpb.GetVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.GetVectorResponse, error) {
+	return &lumenvecpb.GetVectorResponse{}, nil
+}
+
+func TestGRPCClientNilProtoValues(t *testing.T) {
+	c := &GRPCVectorClient{client: &nilVecService{}, timeout: time.Second}
+
+	vecs, err := c.ListVectors()
+	if err != nil {
+		t.Fatalf("ListVectors() error = %v", err)
+	}
+	if len(vecs) != 1 || vecs[0].ID != "kept" {
+		t.Fatalf("ListVectors() = %+v, want only kept vector", vecs)
+	}
+
+	vec, err := c.GetVector("missing")
+	if err != nil {
+		t.Fatalf("GetVector() error = %v", err)
+	}
+	if vec != nil {
+		t.Fatalf("GetVector() = %+v, want nil", vec)
+	}
+}
+
+type pagedVecService struct {
+	fakeVecService
+	requests []*lumenvecpb.ListVectorsRequest
+}
+
+func (f *pagedVecService) ListVectors(ctx context.Context, in *lumenvecpb.ListVectorsRequest, opts ...grpc.CallOption) (*lumenvecpb.ListVectorsResponse, error) {
+	f.requests = append(f.requests, in)
+	if in.GetCursor() == "" {
+		return &lumenvecpb.ListVectorsResponse{
+			Vectors:    []*lumenvecpb.Vector{{Id: "a", Values: []float64{1}}},
+			NextCursor: "next-page",
+		}, nil
+	}
+	return &lumenvecpb.ListVectorsResponse{
+		Vectors: []*lumenvecpb.Vector{{Id: "b", Values: []float64{2}}},
+	}, nil
+}
+
+func TestGRPCClientListVectorsUsesPagedRequests(t *testing.T) {
+	svc := &pagedVecService{}
+	c := &GRPCVectorClient{client: svc, timeout: time.Second}
+
+	vecs, err := c.ListVectors()
+	if err != nil {
+		t.Fatalf("ListVectors() error = %v", err)
+	}
+	if len(vecs) != 2 || vecs[0].ID != "a" || vecs[1].ID != "b" {
+		t.Fatalf("ListVectors() = %+v, want a,b", vecs)
+	}
+	if len(svc.requests) != 2 {
+		t.Fatalf("ListVectors made %d requests, want 2", len(svc.requests))
+	}
+	if svc.requests[0].GetLimit() != defaultGRPCListVectorsLimit || svc.requests[0].GetCursor() != "" {
+		t.Fatalf("first request = %+v", svc.requests[0])
+	}
+	if svc.requests[1].GetLimit() != defaultGRPCListVectorsLimit || svc.requests[1].GetCursor() != "next-page" {
+		t.Fatalf("second request = %+v", svc.requests[1])
+	}
+}
+
+func TestGRPCClientListVectorsPageOptions(t *testing.T) {
+	svc := &pagedVecService{}
+	c := &GRPCVectorClient{client: svc, timeout: time.Second}
+
+	page, err := c.ListVectorsPage(ListVectorsOptions{Limit: 25, Cursor: "cursor", IDsOnly: true})
+	if err != nil {
+		t.Fatalf("ListVectorsPage() error = %v", err)
+	}
+	if len(page.Vectors) != 1 || page.Vectors[0].ID != "b" {
+		t.Fatalf("ListVectorsPage() = %+v", page)
+	}
+	if len(svc.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(svc.requests))
+	}
+	req := svc.requests[0]
+	if req.GetLimit() != 25 || req.GetCursor() != "cursor" || !req.GetIdsOnly() {
+		t.Fatalf("request = %+v, want limit/cursor/ids_only", req)
+	}
+}
+
+type errorVecService struct {
+	err error
+}
+
+func (f *errorVecService) Health(ctx context.Context, in *lumenvecpb.HealthRequest, opts ...grpc.CallOption) (*lumenvecpb.HealthResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) ListVectors(ctx context.Context, in *lumenvecpb.ListVectorsRequest, opts ...grpc.CallOption) (*lumenvecpb.ListVectorsResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) AddVector(ctx context.Context, in *lumenvecpb.AddVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.AddVectorResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) AddVectorsBatch(ctx context.Context, in *lumenvecpb.AddVectorsBatchRequest, opts ...grpc.CallOption) (*lumenvecpb.AddVectorsBatchResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) GetVector(ctx context.Context, in *lumenvecpb.GetVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.GetVectorResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) Search(ctx context.Context, in *lumenvecpb.SearchRequest, opts ...grpc.CallOption) (*lumenvecpb.SearchResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) SearchBatch(ctx context.Context, in *lumenvecpb.SearchBatchRequest, opts ...grpc.CallOption) (*lumenvecpb.SearchBatchResponse, error) {
+	return nil, f.err
+}
+func (f *errorVecService) DeleteVector(ctx context.Context, in *lumenvecpb.DeleteVectorRequest, opts ...grpc.CallOption) (*lumenvecpb.DeleteVectorResponse, error) {
+	return nil, f.err
+}
+
+func TestGRPCClientPropagatesErrors(t *testing.T) {
+	wantErr := errors.New("rpc failed")
+	c := &GRPCVectorClient{client: &errorVecService{err: wantErr}, timeout: time.Second}
+
+	check := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("%s error = %v, want %v", name, err, wantErr)
+		}
+	}
+
+	_, err := c.Health()
+	check("Health", err)
+	_, err = c.ListVectors()
+	check("ListVectors", err)
+	check("AddVectorWithID", c.AddVectorWithID("a", []float64{1}))
+	check("AddVectors", c.AddVectors([]VectorPayload{{ID: "a", Values: []float64{1}}}))
+	_, err = c.GetVector("a")
+	check("GetVector", err)
+	_, err = c.SearchVector([]float64{1}, 1)
+	check("SearchVector", err)
+	_, err = c.SearchVectors([]BatchSearchQuery{{ID: "q", Values: []float64{1}, K: 1}})
+	check("SearchVectors", err)
+	check("DeleteVector", c.DeleteVector("a"))
 }

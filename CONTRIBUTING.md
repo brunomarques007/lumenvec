@@ -1,5 +1,19 @@
 # Contributing
 
+## Contribution Flow
+
+- Do not open pull requests directly from `main`.
+- Start from an up-to-date local `main`, create a feature branch, and work from that branch.
+- Open the PR from your feature branch into `main`.
+
+Recommended flow:
+
+```bash
+git checkout main
+git pull origin main
+git checkout -b feature/short-description
+```
+
 ## Development Setup
 
 1. Install Go `1.23+`.
@@ -56,6 +70,7 @@ Examples and integration-only packages are not part of this threshold.
 
 ## Pull Requests
 
+- Branch from a feature branch, not directly from `main`.
 - Describe the problem and the chosen approach.
 - Mention any API, config, persistence, or benchmark impact.
 - Mention any security impact and whether the change affects `development` and `production` profiles differently.

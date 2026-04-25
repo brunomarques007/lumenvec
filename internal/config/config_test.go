@@ -33,6 +33,9 @@ func TestLoadDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.Security.Storage.DirMode != "0755" || cfg.Security.Storage.FileMode != "0644" {
 		t.Fatal("expected relaxed development file modes")
 	}
+	if cfg.Database.SyncEvery != 1 {
+		t.Fatal("expected default sync_every")
+	}
 }
 
 func TestLoadFromFileAndEnv(t *testing.T) {
@@ -51,6 +54,7 @@ database:
   snapshot_every: 12
   vector_store: "disk"
   vector_path: "./vectors"
+  sync_every: 16
   cache_enabled: true
   cache_max_bytes: 2048
   cache_max_items: 321
@@ -118,6 +122,9 @@ security:
 	if cfg.Database.VectorStore != "disk" || cfg.Database.VectorPath != "./vectors" {
 		t.Fatal("expected vector store config from yaml")
 	}
+	if cfg.Database.SyncEvery != 16 {
+		t.Fatal("expected sync_every config from yaml")
+	}
 	if !cfg.Database.CacheEnabled || cfg.Database.CacheMaxBytes != 2048 || cfg.Database.CacheMaxItems != 321 || cfg.Database.CacheTTL != "30s" {
 		t.Fatal("expected cache config from yaml")
 	}
@@ -161,11 +168,12 @@ func TestOverrideFromEnvIgnoresInvalidNumericValues(t *testing.T) {
 	cfg := defaultConfig()
 	t.Setenv("VECTOR_DB_RATE_LIMIT_RPS", "bad")
 	t.Setenv("VECTOR_DB_SNAPSHOT_EVERY", "-1")
+	t.Setenv("VECTOR_DB_SYNC_EVERY", "0")
 	t.Setenv("VECTOR_DB_MAX_BODY_BYTES", "bad")
 	t.Setenv("VECTOR_DB_MAX_VECTOR_DIM", "bad")
 	t.Setenv("VECTOR_DB_MAX_K", "bad")
 	overrideFromEnv(&cfg)
-	if cfg.Server.RateLimitRPS != 100 || cfg.Database.SnapshotEvery != 25 || cfg.Limits.MaxK != 100 {
+	if cfg.Server.RateLimitRPS != 100 || cfg.Database.SnapshotEvery != 25 || cfg.Database.SyncEvery != 1 || cfg.Limits.MaxK != 100 {
 		t.Fatal("expected invalid env values to be ignored")
 	}
 }
@@ -194,6 +202,7 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	t.Setenv("VECTOR_DB_CACHE_TTL", "45s")
 	t.Setenv("VECTOR_DB_VECTOR_STORE", "disk")
 	t.Setenv("VECTOR_DB_VECTOR_PATH", "/tmp/vectors")
+	t.Setenv("VECTOR_DB_SYNC_EVERY", "32")
 	t.Setenv("VECTOR_DB_GRPC_ENABLED", "true")
 	t.Setenv("VECTOR_DB_GRPC_PORT", "22000")
 	t.Setenv("VECTOR_DB_SECURITY_PROFILE", "production")
@@ -222,7 +231,7 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	if cfg.Database.SnapshotPath != "/tmp/snap" || cfg.Database.WALPath != "/tmp/wal" {
 		t.Fatal("expected path overrides")
 	}
-	if cfg.Database.VectorStore != "disk" || cfg.Database.VectorPath != "/tmp/vectors" {
+	if cfg.Database.VectorStore != "disk" || cfg.Database.VectorPath != "/tmp/vectors" || cfg.Database.SyncEvery != 32 {
 		t.Fatal("expected vector store overrides")
 	}
 	if !cfg.Database.CacheEnabled || cfg.Database.CacheMaxBytes != 4096 || cfg.Database.CacheMaxItems != 222 || cfg.Database.CacheTTL != "45s" {
@@ -257,6 +266,15 @@ func TestOverrideFromEnvValidValues(t *testing.T) {
 	}
 	if !cfg.Security.Storage.StrictFilePermissions || cfg.Security.Storage.DirMode != "0700" || cfg.Security.Storage.FileMode != "0600" {
 		t.Fatal("expected storage overrides")
+	}
+}
+
+func TestOverrideFromEnvAllowsDisablingRateLimit(t *testing.T) {
+	cfg := defaultConfig()
+	t.Setenv("VECTOR_DB_RATE_LIMIT_RPS", "0")
+	overrideFromEnv(&cfg)
+	if cfg.Server.RateLimitRPS != 0 {
+		t.Fatalf("expected rate limit to be disabled, got %d", cfg.Server.RateLimitRPS)
 	}
 }
 

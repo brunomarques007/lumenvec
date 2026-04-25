@@ -287,12 +287,52 @@ func TestCachedVectorStoreReadOnlyAndBackendPassthroughs(t *testing.T) {
 	if vec2.Values[0] == 99 {
 		t.Fatal("expected cached read-only value to remain immutable from caller perspective")
 	}
-
+	values32, err := cached.GetVectorReadOnly32("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values32) != 3 || values32[0] != 1 || backend.readOnlyGets != 1 {
+		t.Fatalf("expected cached float32 read without backend fetch, values=%v readOnlyGets=%d", values32, backend.readOnlyGets)
+	}
 	if len(cached.ListVectors()) != 1 {
 		t.Fatal("expected list vectors passthrough")
 	}
 	if err := cached.Close(); err != nil || !backend.closed {
 		t.Fatal("expected close passthrough")
+	}
+}
+
+func TestCachedVectorStoreReadOnly32Paths(t *testing.T) {
+	memoryBackend := newMemoryVectorStore()
+	if err := memoryBackend.UpsertVector(index.Vector{ID: "a", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+	cachedMemory := newCachedVectorStore(memoryBackend, CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2}).(*cachedVectorStore)
+	values, err := cachedMemory.GetVectorReadOnly32("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 3 || values[0] != 1 {
+		t.Fatalf("GetVectorReadOnly32 memory values = %v", values)
+	}
+	if values, ok := cachedMemory.getCachedReadOnly32("a"); !ok || len(values) != 3 {
+		t.Fatalf("expected cached float32 values, got %v ok=%v", values, ok)
+	}
+
+	regularBackend := newCountingVectorStore()
+	if err := regularBackend.UpsertVector(index.Vector{ID: "b", Values: []float64{4, 5, 6}}); err != nil {
+		t.Fatal(err)
+	}
+	cachedRegular := newCachedVectorStore(regularBackend, CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2}).(*cachedVectorStore)
+	values, err = cachedRegular.GetVectorReadOnly32("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 3 || values[0] != 4 || regularBackend.gets != 1 {
+		t.Fatalf("GetVectorReadOnly32 regular values=%v gets=%d", values, regularBackend.gets)
+	}
+	if _, err := cachedRegular.GetVectorReadOnly32("missing"); !errors.Is(err, index.ErrVectorNotFound) {
+		t.Fatalf("expected missing error, got %v", err)
 	}
 }
 
@@ -318,6 +358,30 @@ func TestCachedVectorStorePersistenceAndDiskStatsPassthrough(t *testing.T) {
 	}
 }
 
+func TestCachedVectorStorePageVectorIDs(t *testing.T) {
+	backend := newMemoryVectorStore()
+	for _, id := range []string{"c", "a", "b"} {
+		if err := backend.UpsertVector(index.Vector{ID: id, Values: []float64{1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cached := newCachedVectorStore(backend, CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2}).(*cachedVectorStore)
+	got := cached.PageVectorIDs("a", 2)
+	if len(got) != 2 || got[0] != "b" || got[1] != "c" {
+		t.Fatalf("PageVectorIDs = %v, want [b c]", got)
+	}
+
+	fallbackBackend := newCountingVectorStore()
+	if err := fallbackBackend.UpsertVector(index.Vector{ID: "x", Values: []float64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	cachedFallback := newCachedVectorStore(fallbackBackend, CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2}).(*cachedVectorStore)
+	got = cachedFallback.PageVectorIDs("", 1)
+	if len(got) != 1 || got[0] != "x" {
+		t.Fatalf("fallback PageVectorIDs = %v, want [x]", got)
+	}
+}
+
 func TestCachedVectorStorePutUpdateAndHelpers(t *testing.T) {
 	store := newCachedVectorStore(newCountingVectorStore(), CacheOptions{Enabled: true, MaxBytes: 1024, MaxItems: 2})
 	cached := store.(*cachedVectorStore)
@@ -325,6 +389,10 @@ func TestCachedVectorStorePutUpdateAndHelpers(t *testing.T) {
 	cached.mu.Lock()
 	cached.putLocked(index.Vector{ID: "a", Values: []float64{1, 2, 3}})
 	firstExpiry := cached.entries["a"].Value.(*cacheEntry).expiresAt
+	firstBytes := cached.entries["a"].Value.(*cacheEntry).sizeBytes
+	if firstBytes != int64(len("a")+3*4) {
+		t.Fatalf("expected cache to account float32 bytes, got %d", firstBytes)
+	}
 	cached.putLocked(index.Vector{ID: "a", Values: []float64{4, 5, 6}})
 	cached.currentBytes = -5
 	cached.mu.Unlock()

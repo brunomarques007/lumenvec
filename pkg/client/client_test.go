@@ -13,6 +13,10 @@ func TestClientBatchOperations(t *testing.T) {
 	mux.HandleFunc("/vectors/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 	})
+	mux.HandleFunc("/vectors/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"doc-1","distance":0.1}]`))
+	})
 	mux.HandleFunc("/vectors/search/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"q1","results":[{"id":"doc-1","distance":0.1}]}]`))
@@ -92,6 +96,10 @@ func TestClientMarshalErrorsAndEmptySearchResult(t *testing.T) {
 	mux.HandleFunc("/vectors/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 	})
+	mux.HandleFunc("/vectors/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	})
 	mux.HandleFunc("/vectors/search/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[]`))
@@ -114,6 +122,9 @@ func TestClientMarshalErrorsAndEmptySearchResult(t *testing.T) {
 
 func TestClientSearchStatusAndTransportErrors(t *testing.T) {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/vectors/search", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
 	mux.HandleFunc("/vectors/search/batch", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	})
@@ -121,6 +132,9 @@ func TestClientSearchStatusAndTransportErrors(t *testing.T) {
 	defer srv.Close()
 
 	c := NewVectorClient(srv.URL)
+	if _, err := c.SearchVector([]float64{1}, 1); err == nil {
+		t.Fatal("expected search status error")
+	}
 	if _, err := c.SearchVectors([]BatchSearchQuery{{ID: "q", Values: []float64{1}, K: 1}}); err == nil {
 		t.Fatal("expected search status error")
 	}

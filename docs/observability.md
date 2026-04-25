@@ -4,6 +4,11 @@
 
 LumenVec exposes Prometheus metrics at `GET /metrics`.
 
+Operational note:
+
+- HTTP is the default transport and should be treated as the baseline integration path
+- gRPC should be preferred when the goal is to minimize transport overhead under sustained search load
+
 Core ANN health metrics:
 
 - `lumenvec_core_ann_searches_total`

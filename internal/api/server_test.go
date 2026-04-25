@@ -64,6 +64,25 @@ func TestServerHandlersLifecycleAndBatch(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/vectors", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var listPayload struct {
+		Vectors []struct {
+			ID     string    `json:"id"`
+			Values []float64 `json:"values"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("json.Unmarshal() list vectors: %v", err)
+	}
+	if len(listPayload.Vectors) != 1 || listPayload.Vectors[0].ID != "a" {
+		t.Fatalf("unexpected list after first upsert: %+v", listPayload)
+	}
+
+	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/vectors/search", bytes.NewBufferString(`{"values":[1,2,3],"k":1}`))
 	server.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -89,6 +108,27 @@ func TestServerHandlersLifecycleAndBatch(t *testing.T) {
 	}
 	if len(got) != 1 || got[0]["id"] != "q1" {
 		t.Fatal("unexpected batch search payload")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/vectors", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 list, got %d", rec.Code)
+	}
+	var listPayload2 struct {
+		Vectors []struct {
+			ID string `json:"id"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listPayload2); err != nil {
+		t.Fatalf("json.Unmarshal() list vectors: %v", err)
+	}
+	if len(listPayload2.Vectors) != 2 {
+		t.Fatalf("expected 2 vectors, got %d", len(listPayload2.Vectors))
+	}
+	if listPayload2.Vectors[0].ID != "a" || listPayload2.Vectors[1].ID != "b" {
+		t.Fatalf("expected sorted ids a,b, got %+v", listPayload2.Vectors)
 	}
 
 	rec = httptest.NewRecorder()

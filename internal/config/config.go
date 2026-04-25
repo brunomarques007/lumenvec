@@ -16,6 +16,8 @@ type Config struct {
 		ReadTimeout  string `yaml:"read_timeout"`
 		WriteTimeout string `yaml:"write_timeout"`
 		APIKey       string `yaml:"api_key"`
+		AccessLog    bool   `yaml:"access_log"`
+		Metrics      bool   `yaml:"metrics_enabled"`
 		RateLimitRPS int    `yaml:"rate_limit_rps"`
 	} `yaml:"server"`
 	Database struct {
@@ -24,6 +26,7 @@ type Config struct {
 		SnapshotEvery int    `yaml:"snapshot_every"`
 		VectorStore   string `yaml:"vector_store"`
 		VectorPath    string `yaml:"vector_path"`
+		SyncEvery     int    `yaml:"sync_every"`
 		CacheEnabled  bool   `yaml:"cache_enabled"`
 		CacheMaxBytes int64  `yaml:"cache_max_bytes"`
 		CacheMaxItems int    `yaml:"cache_max_items"`
@@ -103,12 +106,15 @@ func defaultConfig() Config {
 	cfg.Server.ReadTimeout = "10s"
 	cfg.Server.WriteTimeout = "10s"
 	cfg.Server.APIKey = ""
+	cfg.Server.AccessLog = false
+	cfg.Server.Metrics = true
 	cfg.Server.RateLimitRPS = 100
 	cfg.Database.SnapshotPath = "./data/snapshot.json"
 	cfg.Database.WALPath = "./data/wal.log"
 	cfg.Database.SnapshotEvery = 25
 	cfg.Database.VectorStore = "memory"
 	cfg.Database.VectorPath = "./data/vectors"
+	cfg.Database.SyncEvery = 1
 	cfg.Database.CacheEnabled = false
 	cfg.Database.CacheMaxBytes = 8 << 20
 	cfg.Database.CacheMaxItems = 1024
@@ -152,8 +158,18 @@ func overrideFromEnv(cfg *Config) {
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_API_KEY")); v != "" {
 		cfg.Server.APIKey = v
 	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_ACCESS_LOG")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Server.AccessLog = enabled
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_METRICS_ENABLED")); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Server.Metrics = enabled
+		}
+	}
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_RATE_LIMIT_RPS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.Server.RateLimitRPS = n
 		}
 	}
@@ -173,6 +189,11 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_VECTOR_PATH")); v != "" {
 		cfg.Database.VectorPath = v
+	}
+	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_SYNC_EVERY")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Database.SyncEvery = n
+		}
 	}
 	if v := strings.TrimSpace(os.Getenv("VECTOR_DB_CACHE_ENABLED")); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {

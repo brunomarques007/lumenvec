@@ -6,6 +6,17 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [v0.2.5] - 2026-04-12
+
+Automated release from `v0.2.4` to `v0.2.5`.
+
+### Commits
+- Fix container security scanning (a013c5e)
+- Pin Trivy setup action (d3d8029)
+- Fix container security scan workflow (078fe1b)
+- Harden container runtime and image scanning (04181f3)
+
+
 ## [v0.2.2] - 2026-04-12
 
 Automated release from `v0.2.1` to `v0.2.2`.

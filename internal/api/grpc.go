@@ -31,6 +31,51 @@ func (h *grpcHandler) Health(context.Context, *lumenvecpb.HealthRequest) (*lumen
 	return &lumenvecpb.HealthResponse{Status: "ok"}, nil
 }
 
+func (h *grpcHandler) ListVectors(_ context.Context, req *lumenvecpb.ListVectorsRequest) (*lumenvecpb.ListVectorsResponse, error) {
+	limit, err := listVectorsGRPCLimit(req.GetLimit())
+	if err != nil {
+		return nil, err
+	}
+
+	afterID := ""
+	if cursor := strings.TrimSpace(req.GetCursor()); cursor != "" {
+		decoded, err := decodeListVectorsCursor(cursor)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "cursor must be a valid list cursor")
+		}
+		afterID = decoded
+	}
+
+	page := h.service.ListVectorsPage(core.ListVectorsOptions{
+		AfterID: afterID,
+		Limit:   limit,
+		IDsOnly: req.GetIdsOnly(),
+	})
+	out := make([]*lumenvecpb.Vector, 0, len(page.Vectors))
+	for _, vec := range page.Vectors {
+		out = append(out, &lumenvecpb.Vector{Id: vec.ID, Values: vec.Values})
+	}
+
+	resp := &lumenvecpb.ListVectorsResponse{Vectors: out}
+	if page.NextCursor != "" {
+		resp.NextCursor = encodeListVectorsCursor(page.NextCursor)
+	}
+	return resp, nil
+}
+
+func listVectorsGRPCLimit(limit int32) (int, error) {
+	if limit < 0 {
+		return 0, status.Error(codes.InvalidArgument, "limit must be a positive integer")
+	}
+	if limit == 0 {
+		return defaultListVectorsLimit, nil
+	}
+	if limit > maxListVectorsLimit {
+		return maxListVectorsLimit, nil
+	}
+	return int(limit), nil
+}
+
 func (h *grpcHandler) AddVector(_ context.Context, req *lumenvecpb.AddVectorRequest) (*lumenvecpb.AddVectorResponse, error) {
 	if err := h.service.AddVector(req.GetId(), req.GetValues()); err != nil {
 		return nil, grpcStatusFromError(err)

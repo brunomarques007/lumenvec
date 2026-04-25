@@ -79,6 +79,11 @@ That is a deliberate design requirement:
 - keeps cache and persistence semantics aligned
 - makes performance comparisons about transport overhead more meaningful
 
+Transport posture:
+
+- HTTP stays the default connection mode because it is simpler to integrate and operate
+- gRPC stays available as the performance-oriented option when lower transport overhead matters
+
 ## Observability
 
 Metrics are designed around behavior, not just request counts.

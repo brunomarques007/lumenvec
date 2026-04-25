@@ -2,13 +2,16 @@ package api
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
 	"net"
-	"net/netip"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +19,6 @@ import (
 	"lumenvec/internal/index"
 	"lumenvec/internal/index/ann"
 
-	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -31,7 +33,7 @@ var (
 )
 
 type Server struct {
-	router       *mux.Router
+	router       http.Handler
 	protocol     string
 	port         string
 	grpcPort     string
@@ -46,6 +48,8 @@ type Server struct {
 	tlsEnabled   bool
 	tlsCertFile  string
 	tlsKeyFile   string
+	accessLog    bool
+	metrics      bool
 	trustXFF     bool
 	trustedCIDRs []netip.Prefix
 	rateLimiter  *rateLimiter
@@ -79,6 +83,16 @@ type batchSearchRequest struct {
 	Queries []batchSearchQuery `json:"queries"`
 }
 
+type listVectorsResponse struct {
+	Vectors    []vectorPayload `json:"vectors"`
+	NextCursor string          `json:"next_cursor,omitempty"`
+}
+
+const (
+	defaultListVectorsLimit = 100
+	maxListVectorsLimit     = 1000
+)
+
 type ServerOptions struct {
 	Protocol          string
 	Port              string
@@ -92,7 +106,10 @@ type ServerOptions struct {
 	SnapshotEvery     int
 	VectorStore       string
 	VectorPath        string
+	SyncEvery         int
 	APIKey            string
+	MetricsEnabled    bool
+	DisableRateLimit  bool
 	RateLimitRPS      int
 	SearchMode        string
 	ANNProfile        string
@@ -113,6 +130,7 @@ type ServerOptions struct {
 	TLSEnabled        bool
 	TLSCertFile       string
 	TLSKeyFile        string
+	AccessLogEnabled  bool
 	TrustForwardedFor bool
 	TrustedProxies    []string
 	StrictFilePerms   bool
@@ -133,7 +151,9 @@ var defaultServerOptions = ServerOptions{
 	SnapshotEvery:     25,
 	VectorStore:       "memory",
 	VectorPath:        "./data/vectors",
+	SyncEvery:         1,
 	APIKey:            "",
+	MetricsEnabled:    true,
 	RateLimitRPS:      100,
 	SearchMode:        "exact",
 	ANNProfile:        "balanced",
@@ -147,6 +167,7 @@ var defaultServerOptions = ServerOptions{
 	CacheTTL:          15 * time.Minute,
 	GRPCEnabled:       false,
 	GRPCPort:          ":19191",
+	AccessLogEnabled:  false,
 }
 
 func NewServer(port string) *Server {
@@ -161,7 +182,6 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 	opts = applyDefaults(opts)
 
 	s := &Server{
-		router:       mux.NewRouter(),
 		protocol:     opts.Protocol,
 		port:         opts.Port,
 		grpcPort:     opts.GRPCPort,
@@ -184,6 +204,7 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 			ANNEvalSampleRate: opts.ANNEvalSampleRate,
 			VectorStore:       opts.VectorStore,
 			VectorPath:        opts.VectorPath,
+			SyncEvery:         opts.SyncEvery,
 			StorageSecurity: core.StorageSecurityOptions{
 				StrictFilePermissions: opts.StrictFilePerms,
 				DirMode:               core.ParseFileMode(opts.StorageDirMode, os.FileMode(0o755)),
@@ -198,16 +219,20 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 		}),
 		maxBodyBytes: opts.MaxBodyBytes,
 		apiKey:       firstNonEmpty(opts.AuthAPIKey, opts.APIKey),
+		metrics:      opts.MetricsEnabled,
 		authEnabled:  opts.AuthEnabled,
 		grpcAuth:     opts.GRPCAuthEnabled,
 		tlsEnabled:   opts.TLSEnabled,
 		tlsCertFile:  opts.TLSCertFile,
 		tlsKeyFile:   opts.TLSKeyFile,
+		accessLog:    opts.AccessLogEnabled,
 		trustXFF:     opts.TrustForwardedFor,
 		trustedCIDRs: parseTrustedProxies(opts.TrustedProxies),
 		rateLimiter:  newRateLimiter(opts.RateLimitRPS, time.Second),
 	}
-	s.requestTotal, s.requestDuration, s.metricsRegistry = newMetricsRegistry(s.service)
+	if s.metrics {
+		s.requestTotal, s.requestDuration, s.metricsRegistry = newMetricsRegistry(s.service)
+	}
 	s.routes()
 	return s
 }
@@ -321,8 +346,14 @@ func applyDefaults(opts ServerOptions) ServerOptions {
 	if opts.SnapshotEvery <= 0 {
 		opts.SnapshotEvery = defaultServerOptions.SnapshotEvery
 	}
-	if opts.RateLimitRPS <= 0 {
+	if opts.SyncEvery <= 0 {
+		opts.SyncEvery = defaultServerOptions.SyncEvery
+	}
+	if !opts.DisableRateLimit && opts.RateLimitRPS <= 0 {
 		opts.RateLimitRPS = defaultServerOptions.RateLimitRPS
+	}
+	if opts.DisableRateLimit {
+		opts.RateLimitRPS = 0
 	}
 	if strings.TrimSpace(opts.SearchMode) == "" {
 		opts.SearchMode = defaultServerOptions.SearchMode
@@ -369,23 +400,71 @@ func normalizeServerProtocol(protocol string) string {
 }
 
 func (s *Server) routes() {
-	s.router.Use(s.accessLogMiddleware)
-	s.router.Use(s.metricsMiddleware)
-	s.router.Use(s.authMiddleware)
-	s.router.Use(s.rateLimitMiddleware)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", methodHandler(http.MethodGet, s.HealthHandler))
+	if s.metrics && s.metricsRegistry != nil {
+		mux.Handle("/metrics", methodHandler(http.MethodGet, promhttp.HandlerFor(s.metricsRegistry, promhttp.HandlerOpts{}).ServeHTTP))
+	}
+	mux.HandleFunc("/vectors", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.ListVectorsHandler(w, r)
+		case http.MethodPost:
+			s.AddVectorHandler(w, r)
+		default:
+			methodNotAllowed(w)
+		}
+	})
+	mux.HandleFunc("/vectors/batch", methodHandler(http.MethodPost, s.AddVectorsBatchHandler))
+	mux.HandleFunc("/vectors/search", methodHandler(http.MethodPost, s.SearchVectorsHandler))
+	mux.HandleFunc("/vectors/search/batch", methodHandler(http.MethodPost, s.SearchVectorsBatchHandler))
+	mux.HandleFunc("/vectors/", s.vectorByIDHandler)
 
-	s.router.HandleFunc("/health", s.HealthHandler).Methods(http.MethodGet)
-	s.router.Handle("/metrics", promhttp.HandlerFor(s.metricsRegistry, promhttp.HandlerOpts{})).Methods(http.MethodGet)
-	s.router.HandleFunc("/vectors", s.AddVectorHandler).Methods(http.MethodPost)
-	s.router.HandleFunc("/vectors/batch", s.AddVectorsBatchHandler).Methods(http.MethodPost)
-	s.router.HandleFunc("/vectors/search", s.SearchVectorsHandler).Methods(http.MethodPost)
-	s.router.HandleFunc("/vectors/search/batch", s.SearchVectorsBatchHandler).Methods(http.MethodPost)
-	s.router.HandleFunc("/vectors/{id}", s.GetVectorHandler).Methods(http.MethodGet)
-	s.router.HandleFunc("/vectors/{id}", s.DeleteVectorHandler).Methods(http.MethodDelete)
+	var handler http.Handler = mux
+	handler = s.accessLogMiddleware(handler)
+	if s.metrics {
+		handler = s.metricsMiddleware(handler)
+	}
+	if s.authEnabled && s.apiKey != "" {
+		handler = s.authMiddleware(handler)
+	}
+	if s.rateLimiter != nil {
+		handler = s.rateLimitMiddleware(handler)
+	}
+	s.router = handler
 }
 
 func (s *Server) Router() http.Handler {
 	return s.router
+}
+
+func methodHandler(method string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			methodNotAllowed(w)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+func methodNotAllowed(w http.ResponseWriter) {
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) vectorByIDHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/vectors/" || !strings.HasPrefix(r.URL.Path, "/vectors/") {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.GetVectorHandler(w, r)
+	case http.MethodDelete:
+		s.DeleteVectorHandler(w, r)
+	default:
+		methodNotAllowed(w)
+	}
 }
 
 func (s *Server) HealthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -393,11 +472,104 @@ func (s *Server) HealthHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func (s *Server) ListVectorsHandler(w http.ResponseWriter, r *http.Request) {
+	// Optional query params:
+	// - limit (int): maximum number of vectors to return, capped by maxListVectorsLimit
+	// - cursor (string): opaque base64-encoded last ID (exclusive)
+	// - after (string): legacy raw id cursor (backwards compat)
+	// - ids_only (bool): when true, return only ids (no values)
+	q := r.URL.Query()
+	limit, ok := parseListVectorsLimit(q)
+	if !ok {
+		http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	afterID := strings.TrimSpace(q.Get("after"))
+	if cursorVal := strings.TrimSpace(q.Get("cursor")); cursorVal != "" {
+		decoded, err := decodeListVectorsCursor(cursorVal)
+		if err != nil {
+			http.Error(w, "cursor must be a valid list cursor", http.StatusBadRequest)
+			return
+		}
+		afterID = decoded
+	}
+
+	idsOnly := false
+	if v := strings.TrimSpace(q.Get("ids_only")); v != "" {
+		if v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+			idsOnly = true
+		}
+	}
+
+	page := s.service.ListVectorsPage(core.ListVectorsOptions{
+		AfterID: afterID,
+		Limit:   limit,
+		IDsOnly: idsOnly,
+	})
+	var nextCursor string
+	if page.NextCursor != "" {
+		nextCursor = encodeListVectorsCursor(page.NextCursor)
+	}
+
+	if idsOnly {
+		payload := struct {
+			Vectors []struct {
+				ID string `json:"id"`
+			} `json:"vectors"`
+			NextCursor string `json:"next_cursor,omitempty"`
+		}{Vectors: make([]struct {
+			ID string `json:"id"`
+		}, 0, len(page.Vectors)), NextCursor: nextCursor}
+		for _, v := range page.Vectors {
+			payload.Vectors = append(payload.Vectors, struct {
+				ID string `json:"id"`
+			}{ID: v.ID})
+		}
+		writeJSON(w, 0, payload)
+		return
+	}
+
+	out := make([]vectorPayload, 0, len(page.Vectors))
+	for _, vec := range page.Vectors {
+		out = append(out, vectorPayload{ID: vec.ID, Values: vec.Values})
+	}
+	writeJSON(w, 0, listVectorsResponse{Vectors: out, NextCursor: nextCursor})
+}
+
+func parseListVectorsLimit(values url.Values) (int, bool) {
+	raw := strings.TrimSpace(values.Get("limit"))
+	if raw == "" {
+		return defaultListVectorsLimit, true
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 {
+		return 0, false
+	}
+	if limit > maxListVectorsLimit {
+		return maxListVectorsLimit, true
+	}
+	return limit, true
+}
+
+func decodeListVectorsCursor(cursor string) (string, error) {
+	if decoded, err := base64.RawURLEncoding.DecodeString(cursor); err == nil {
+		return string(decoded), nil
+	}
+	decoded, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
+
+func encodeListVectorsCursor(id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(id))
+}
+
 func (s *Server) AddVectorHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var payload vectorPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &payload) {
 		return
 	}
 	if payload.ID == "" {
@@ -416,10 +588,8 @@ func (s *Server) AddVectorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) AddVectorsBatchHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var req batchVectorsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &req) {
 		return
 	}
 	vectors := make([]index.Vector, 0, len(req.Vectors))
@@ -438,7 +608,7 @@ func (s *Server) AddVectorsBatchHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) GetVectorHandler(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
+	id := vectorIDFromPath(r.URL.Path)
 	vec, err := s.service.GetVector(id)
 	if err != nil {
 		if errors.Is(err, index.ErrVectorNotFound) {
@@ -449,12 +619,11 @@ func (s *Server) GetVectorHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(vectorPayload{ID: vec.ID, Values: vec.Values})
+	writeJSON(w, 0, vectorPayload{ID: vec.ID, Values: vec.Values})
 }
 
 func (s *Server) DeleteVectorHandler(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
+	id := vectorIDFromPath(r.URL.Path)
 	if err := s.service.DeleteVector(id); err != nil {
 		if errors.Is(err, index.ErrVectorNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -467,10 +636,8 @@ func (s *Server) DeleteVectorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) SearchVectorsHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var req searchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &req) {
 		return
 	}
 	results, err := s.service.Search(req.Values, req.K)
@@ -478,16 +645,12 @@ func (s *Server) SearchVectorsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), statusFromServiceError(err))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(results)
+	writeJSON(w, 0, results)
 }
 
 func (s *Server) SearchVectorsBatchHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var req batchSearchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	if !s.readJSON(w, r, &req) {
 		return
 	}
 	queries := make([]core.BatchSearchQuery, 0, len(req.Queries))
@@ -499,9 +662,7 @@ func (s *Server) SearchVectorsBatchHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), statusFromServiceError(err))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(results)
+	writeJSON(w, 0, results)
 }
 
 func (s *Server) Start() {
@@ -540,6 +701,29 @@ func (s *Server) httpServer() *http.Server {
 		ReadTimeout:  s.readTimeout,
 		WriteTimeout: s.writeTimeout,
 	}
+}
+
+const contentTypeJSON = "application/json"
+
+func (s *Server) readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", contentTypeJSON)
+	if status != 0 {
+		w.WriteHeader(status)
+	}
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func vectorIDFromPath(path string) string {
+	return strings.TrimPrefix(path, "/vectors/")
 }
 
 func statusFromServiceError(err error) int {

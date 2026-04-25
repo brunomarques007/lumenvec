@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"lumenvec/internal/index"
+	"lumenvec/internal/vector"
 )
 
 type CacheOptions struct {
@@ -31,7 +32,7 @@ type cachedVectorStore struct {
 
 type cacheEntry struct {
 	id        string
-	vector    index.Vector
+	values    []float32
 	expiresAt time.Time
 	sizeBytes int64
 }
@@ -74,12 +75,29 @@ func newCachedVectorStore(backend VectorStore, opts CacheOptions) VectorStore {
 }
 
 func (s *cachedVectorStore) UpsertVector(vec index.Vector) error {
-	if err := s.backend.UpsertVector(vec); err != nil {
-		return err
+	return s.UpsertVectors([]index.Vector{vec})
+}
+
+func (s *cachedVectorStore) UpsertVectors(vectors []index.Vector) error {
+	if len(vectors) == 0 {
+		return nil
+	}
+	if writer, ok := s.backend.(batchVectorStore); ok {
+		if err := writer.UpsertVectors(vectors); err != nil {
+			return err
+		}
+	} else {
+		for _, vec := range vectors {
+			if err := s.backend.UpsertVector(vec); err != nil {
+				return err
+			}
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.putLocked(index.Vector{ID: vec.ID, Values: cloneVectorValues(vec.Values)})
+	for _, vec := range vectors {
+		s.putLocked(vec)
+	}
 	return nil
 }
 
@@ -111,8 +129,8 @@ func (s *cachedVectorStore) GetVectorReadOnly(id string) (index.Vector, error) {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.putLocked(index.Vector{ID: vec.ID, Values: cloneVectorValues(vec.Values)})
-		return vec, nil
+		s.putLocked(vec)
+		return index.Vector{ID: vec.ID, Values: cloneVectorValues(vec.Values)}, nil
 	}
 
 	vec, err := s.backend.GetVector(id)
@@ -123,6 +141,40 @@ func (s *cachedVectorStore) GetVectorReadOnly(id string) (index.Vector, error) {
 	defer s.mu.Unlock()
 	s.putLocked(vec)
 	return vec, nil
+}
+
+func (s *cachedVectorStore) GetVectorReadOnly32(id string) ([]float32, error) {
+	if values, ok := s.getCachedReadOnly32(id); ok {
+		return values, nil
+	}
+	s.stats.misses.Add(1)
+
+	if reader, ok := s.backend.(readOnlyVector32Reader); ok {
+		values, err := reader.GetVectorReadOnly32(id)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.putLocked32(id, values)
+		return values, nil
+	}
+
+	var vec index.Vector
+	var err error
+	if reader, ok := s.backend.(readOnlyVectorReader); ok {
+		vec, err = reader.GetVectorReadOnly(id)
+	} else {
+		vec, err = s.backend.GetVector(id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	values := vector.ToFloat32(vec.Values)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.putLocked32(vec.ID, values)
+	return values, nil
 }
 
 func (s *cachedVectorStore) DeleteVector(id string) error {
@@ -137,6 +189,25 @@ func (s *cachedVectorStore) DeleteVector(id string) error {
 
 func (s *cachedVectorStore) ListVectors() []index.Vector {
 	return s.backend.ListVectors()
+}
+
+func (s *cachedVectorStore) RangeVectorIDs(fn func(string) bool) {
+	if ranger, ok := s.backend.(vectorIDRanger); ok {
+		ranger.RangeVectorIDs(fn)
+		return
+	}
+	for _, vec := range s.backend.ListVectors() {
+		if !fn(vec.ID) {
+			return
+		}
+	}
+}
+
+func (s *cachedVectorStore) PageVectorIDs(afterID string, limit int) []string {
+	if pager, ok := s.backend.(vectorIDPager); ok {
+		return pager.PageVectorIDs(afterID, limit)
+	}
+	return selectPageIDsFromRange(afterID, limit, s.RangeVectorIDs)
 }
 
 func (s *cachedVectorStore) IsPersistent() bool {
@@ -176,7 +247,7 @@ func (s *cachedVectorStore) getCached(id string) (index.Vector, bool) {
 	}
 	s.stats.hits.Add(1)
 	s.order.MoveToFront(elem)
-	return index.Vector{ID: entry.vector.ID, Values: cloneVectorValues(entry.vector.Values)}, true
+	return index.Vector{ID: entry.id, Values: vector.ToFloat64(entry.values)}, true
 }
 
 func (s *cachedVectorStore) getCachedReadOnly(id string) (index.Vector, bool) {
@@ -195,15 +266,39 @@ func (s *cachedVectorStore) getCachedReadOnly(id string) (index.Vector, bool) {
 	}
 	s.stats.hits.Add(1)
 	s.order.MoveToFront(elem)
-	return entry.vector, true
+	return index.Vector{ID: entry.id, Values: vector.ToFloat64(entry.values)}, true
+}
+
+func (s *cachedVectorStore) getCachedReadOnly32(id string) ([]float32, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	elem, ok := s.entries[id]
+	if !ok {
+		return nil, false
+	}
+	entry := elem.Value.(*cacheEntry)
+	if s.isExpired(entry) {
+		s.stats.misses.Add(1)
+		s.removeElementLocked(elem)
+		return nil, false
+	}
+	s.stats.hits.Add(1)
+	s.order.MoveToFront(elem)
+	return entry.values, true
 }
 
 func (s *cachedVectorStore) putLocked(vec index.Vector) {
-	sizeBytes := estimateVectorSizeBytes(vec)
-	if elem, ok := s.entries[vec.ID]; ok {
+	s.putLocked32(vec.ID, vector.ToFloat32(vec.Values))
+}
+
+func (s *cachedVectorStore) putLocked32(id string, values []float32) {
+	valuesCopy := cloneFloat32Values(values)
+	sizeBytes := estimateVectorSizeBytes32(id, valuesCopy)
+	if elem, ok := s.entries[id]; ok {
 		entry := elem.Value.(*cacheEntry)
 		s.currentBytes -= entry.sizeBytes
-		entry.vector = index.Vector{ID: vec.ID, Values: cloneVectorValues(vec.Values)}
+		entry.values = valuesCopy
 		entry.expiresAt = s.nextExpiry()
 		entry.sizeBytes = sizeBytes
 		s.currentBytes += sizeBytes
@@ -212,13 +307,13 @@ func (s *cachedVectorStore) putLocked(vec index.Vector) {
 		return
 	}
 	entry := &cacheEntry{
-		id:        vec.ID,
-		vector:    index.Vector{ID: vec.ID, Values: cloneVectorValues(vec.Values)},
+		id:        id,
+		values:    valuesCopy,
 		expiresAt: s.nextExpiry(),
 		sizeBytes: sizeBytes,
 	}
 	elem := s.order.PushFront(entry)
-	s.entries[vec.ID] = elem
+	s.entries[id] = elem
 	s.currentBytes += sizeBytes
 	s.evictLocked()
 }
@@ -271,7 +366,17 @@ func (s *cachedVectorStore) evictLocked() {
 }
 
 func estimateVectorSizeBytes(vec index.Vector) int64 {
-	return int64(len(vec.ID)) + int64(len(vec.Values))*8
+	return int64(len(vec.ID)) + int64(len(vec.Values))*4
+}
+
+func estimateVectorSizeBytes32(id string, values []float32) int64 {
+	return int64(len(id)) + int64(len(values))*4
+}
+
+func cloneFloat32Values(values []float32) []float32 {
+	out := make([]float32, len(values))
+	copy(out, values)
+	return out
 }
 
 func maxInt64(a, b int64) int64 {

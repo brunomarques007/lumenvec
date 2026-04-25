@@ -55,4 +55,16 @@ func TestIndexListAndRange(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("expected 2 visits, got %d", count)
 	}
+
+	var seen32 int
+	idx.RangeVectors32(func(id string, values []float32) bool {
+		seen32++
+		if id == "" || len(values) != 2 {
+			t.Fatalf("unexpected RangeVectors32 item id=%q values=%v", id, values)
+		}
+		return true
+	})
+	if seen32 != 2 {
+		t.Fatalf("expected 2 RangeVectors32 visits, got %d", seen32)
+	}
 }

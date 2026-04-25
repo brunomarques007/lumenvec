@@ -1,6 +1,6 @@
 APP_NAME=lumenvec
 
-.PHONY: test vet build run bench tidy coverage docker-build compose-up compose-down compose-validate loadgen release-assets
+.PHONY: test vet build run bench tidy coverage proto docker-build compose-up compose-down compose-validate loadgen release-assets
 
 test:
 	go test ./...
@@ -22,6 +22,9 @@ bench:
 
 coverage:
 	go run ./tools/checkcoverage
+
+proto:
+	buf generate --template buf.gen.yaml --path api/proto/service.proto
 
 docker-build:
 	docker build -t $(APP_NAME):latest .

@@ -168,8 +168,19 @@ func TestMiddlewarePublicPathsAndAccessLog(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/x", nil)
 	access.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted || buf.Len() != 0 {
+		t.Fatal("expected access log to be disabled by default")
+	}
+
+	server.accessLog = true
+	access = server.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/x", nil)
+	access.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted || buf.Len() == 0 {
-		t.Fatal("expected access log output")
+		t.Fatal("expected access log output when enabled")
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
@@ -193,6 +204,7 @@ func TestMetricsEndpointExposesCoreStats(t *testing.T) {
 		SearchMode:        "ann",
 		ANNProfile:        "balanced",
 		ANNEvalSampleRate: 100,
+		MetricsEnabled:    true,
 		CacheEnabled:      true,
 		CacheMaxBytes:     2048,
 		CacheMaxItems:     2,
@@ -242,6 +254,32 @@ func TestMetricsEndpointExposesCoreStats(t *testing.T) {
 	}
 }
 
+func TestMetricsCanBeDisabled(t *testing.T) {
+	base := t.TempDir()
+	server := NewServerWithOptions(ServerOptions{
+		Port:           ":0",
+		ReadTimeout:    5 * time.Second,
+		WriteTimeout:   5 * time.Second,
+		MaxVectorDim:   8,
+		MaxK:           5,
+		SnapshotPath:   filepath.Join(base, "snapshot.json"),
+		WALPath:        filepath.Join(base, "wal.log"),
+		SnapshotEvery:  2,
+		MetricsEnabled: false,
+	})
+
+	if server.metricsRegistry != nil || server.requestTotal != nil || server.requestDuration != nil {
+		t.Fatal("expected metrics infrastructure to be disabled")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for disabled metrics endpoint, got %d", rec.Code)
+	}
+}
+
 func TestMetricsEndpointExposesDiskStoreStats(t *testing.T) {
 	base := t.TempDir()
 	server := NewServerWithOptions(ServerOptions{
@@ -258,6 +296,7 @@ func TestMetricsEndpointExposesDiskStoreStats(t *testing.T) {
 		ANNM:           24,
 		ANNEfConstruct: 96,
 		ANNEfSearch:    96,
+		MetricsEnabled: true,
 		VectorStore:    "disk",
 		VectorPath:     filepath.Join(base, "vectors"),
 	})

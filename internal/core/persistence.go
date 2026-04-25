@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"lumenvec/internal/index"
 )
@@ -23,6 +25,9 @@ type snapshotWALBackend struct {
 	snapshotPath string
 	walPath      string
 	security     StorageSecurityOptions
+	syncEvery    int
+	pendingOps   int
+	mu           sync.Mutex
 }
 
 func newSnapshotWALBackend(snapshotPath, walPath string) *snapshotWALBackend {
@@ -34,7 +39,14 @@ func newSnapshotWALBackendWithSecurity(snapshotPath, walPath string, security St
 		snapshotPath: snapshotPath,
 		walPath:      walPath,
 		security:     normalizeStorageSecurityOptions(security),
+		syncEvery:    1,
 	}
+}
+
+func newSnapshotWALBackendWithOptions(snapshotPath, walPath string, security StorageSecurityOptions, syncEvery int) *snapshotWALBackend {
+	backend := newSnapshotWALBackendWithSecurity(snapshotPath, walPath, security)
+	backend.syncEvery = normalizeSyncEvery(syncEvery)
+	return backend
 }
 
 func (b *snapshotWALBackend) SaveSnapshot(vectors []index.Vector) error {
@@ -74,6 +86,16 @@ func (b *snapshotWALBackend) LoadSnapshot() (map[string][]float64, error) {
 }
 
 func (b *snapshotWALBackend) AppendWAL(op walOp) error {
+	return b.AppendWALBatch([]walOp{op})
+}
+
+func (b *snapshotWALBackend) AppendWALBatch(ops []walOp) error {
+	if len(ops) == 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(b.walPath), b.security.DirMode); err != nil {
 		return err
 	}
@@ -83,14 +105,28 @@ func (b *snapshotWALBackend) AppendWAL(op walOp) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	data, err := json.Marshal(op)
-	if err != nil {
+	writer := bufio.NewWriter(f)
+	for _, op := range ops {
+		data, err := json.Marshal(op)
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Write(append(data, '\n')); err != nil {
+			return err
+		}
+	}
+	if err := writer.Flush(); err != nil {
 		return err
 	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	b.pendingOps += len(ops)
+	if b.pendingOps < b.syncEvery {
+		return nil
+	}
+	if err := f.Sync(); err != nil {
 		return err
 	}
-	return f.Sync()
+	b.pendingOps = 0
+	return nil
 }
 
 func (b *snapshotWALBackend) ReplayWAL(apply func(walOp) error) error {
@@ -121,8 +157,37 @@ func (b *snapshotWALBackend) ReplayWAL(apply func(walOp) error) error {
 }
 
 func (b *snapshotWALBackend) TruncateWAL() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(b.walPath), b.security.DirMode); err != nil {
 		return err
 	}
-	return os.WriteFile(b.walPath, []byte{}, b.security.FileMode)
+	if err := os.WriteFile(b.walPath, []byte{}, b.security.FileMode); err != nil {
+		return err
+	}
+	b.pendingOps = 0
+	return nil
+}
+
+func (b *snapshotWALBackend) Sync() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.pendingOps == 0 {
+		return nil
+	}
+	f, err := os.OpenFile(b.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, b.security.FileMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	b.pendingOps = 0
+	return nil
 }
