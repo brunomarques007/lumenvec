@@ -396,10 +396,31 @@ func TestServiceValidationAndHelpers(t *testing.T) {
 
 func TestServiceSearchBatchANNAndAccumulatorEdgeCases(t *testing.T) {
 	svc := newCoreService(t, "ann")
-	_ = svc.AddVector("a", []float64{1, 2, 3})
-	got, err := svc.SearchBatch([]BatchSearchQuery{{Values: []float64{1, 2, 3}, K: 1}})
-	if err != nil || len(got) != 1 {
+	_ = svc.AddVectors([]index.Vector{
+		{ID: "a", Values: []float64{1, 2, 3}},
+		{ID: "b", Values: []float64{2, 3, 4}},
+		{ID: "c", Values: []float64{3, 4, 5}},
+	})
+	queries := []BatchSearchQuery{
+		{ID: "q-a", Values: []float64{1, 2, 3}, K: 1},
+		{ID: "q-b", Values: []float64{2, 3, 4}, K: 1},
+		{ID: "q-c", Values: []float64{3, 4, 5}, K: 1},
+	}
+	got, err := svc.SearchBatch(queries)
+	if err != nil || len(got) != len(queries) {
 		t.Fatal("expected ANN batch result")
+	}
+	for i, query := range queries {
+		want, err := svc.Search(query.Values, query.K)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if got[i].ID != query.ID {
+			t.Fatalf("batch result %d ID = %q, want %q", i, got[i].ID, query.ID)
+		}
+		if len(got[i].Results) != len(want) || got[i].Results[0].ID != want[0].ID {
+			t.Fatalf("batch result %d = %+v, want %+v", i, got[i].Results, want)
+		}
 	}
 
 	acc := newTopKAccumulator(0)
