@@ -171,6 +171,12 @@ go test ./internal/api -run ^$ -bench BenchmarkTransport -benchmem
 go test ./internal/index/ann -run ^$ -bench "BenchmarkAnnSearch(Tuning)?$" -benchmem
 ```
 
+External benchmark planning:
+
+- [benchmarks/README.md](benchmarks/README.md)
+- [benchmarks/methodology.md](benchmarks/methodology.md)
+- [benchmarks/result_schema.md](benchmarks/result_schema.md)
+
 More details:
 
 - [docs/architecture.md](docs/architecture.md)

@@ -2,11 +2,12 @@
 
 ## Goal
 
-This roadmap turns the planned improvements for LumenVec into an execution backlog. It focuses on three outcomes:
+This roadmap turns the planned improvements for LumenVec into an execution backlog. It focuses on four outcomes:
 
 - reduce search-path overhead in the current core
 - prepare the storage model for hot/cold data management with memory cache
 - keep HTTP as the default transport while adding and tuning gRPC as a higher-throughput option without splitting business logic
+- make LumenVec operationally ready for cloud and managed-service environments
 
 ## Current State
 
@@ -27,6 +28,7 @@ That means memory cache should not be the first change. The first step is to rem
 - cache lookup should be `memory first`, then `store fallback`; not simultaneous reads
 - HTTP and gRPC must reuse the same core service
 - HTTP should remain the default public transport unless there is an explicit product decision to change it
+- the public HTTP surface should evolve into a formally versioned REST API with OpenAPI, stable error shapes, TLS/auth guidance, and cloud-provider integration notes
 - all performance work must be measured with benchmarks and exposed through metrics
 
 ## Delivery Phases
@@ -287,6 +289,7 @@ Work items:
 - add restart and crash-recovery tests
 - add benchmarks for warm-cache and cold-cache scenarios
 - document new configuration and transport behavior
+- formalize the HTTP API as a public REST contract: versioned routes, OpenAPI spec, standard status codes, consistent error bodies, authentication headers, TLS requirements, and compatibility notes for managed cloud platforms
 - update architecture documentation to match the real implementation
 - define rollout notes for mixed HTTP and gRPC deployments
 
@@ -303,6 +306,64 @@ Acceptance criteria:
 - recovery behavior is covered by tests
 - new features are discoverable from README and config examples
 
+### Phase 7: Cloud Readiness
+
+Objective:
+Make LumenVec suitable for cloud deployment, managed platform integration, and repeatable production operations without weakening the current search performance focus.
+
+Principles:
+
+- search performance and recall remain the primary product advantage
+- cloud readiness should improve operability, security, and integration without changing ranking behavior
+- all externally visible APIs must be versioned and documented before being treated as stable
+- container and orchestration defaults must be safe for non-root, persistent-volume deployments
+
+Work items:
+
+- formalize the public HTTP API as REST under versioned routes such as `/v1/vectors`
+- add an OpenAPI specification for HTTP routes, request bodies, response bodies, status codes, and error envelopes
+- define stable error response shapes for HTTP and stable status mapping for gRPC
+- split health checks into liveness and readiness endpoints suitable for Kubernetes and managed platforms
+- document production TLS termination patterns: in-process TLS, reverse proxy TLS, and service mesh TLS
+- document authentication expectations for cloud stacks, including API key headers and future token-based auth
+- add structured JSON logging with request IDs and operation-level fields
+- expose operational metrics for readiness, storage state, persistence failures, WAL/snapshot activity, and request limits
+- add Kubernetes deployment examples for single-node persistent volume deployments
+- document persistent volume ownership, non-root container behavior, backup, restore, and disaster-recovery expectations
+- add graceful shutdown behavior documentation and tests for in-flight HTTP/gRPC requests
+- document cloud-provider integration notes for platforms that expect REST/OpenAPI, health checks, metrics, TLS, and stateless container conventions
+
+Target files:
+
+- `internal/api/server.go`
+- `internal/api/middleware.go`
+- `api/proto/service.proto`
+- `configs/config.yaml`
+- `Dockerfile`
+- `README.md`
+- `docs/api.md`
+- `docs/operations.md`
+- `docs/cloud.md`
+- Kubernetes examples under `deploy/`
+
+Acceptance criteria:
+
+- HTTP API has a checked-in OpenAPI spec
+- liveness and readiness are separate and tested
+- API errors are consistent and documented
+- Docker image runs as non-root with documented persistent-volume permissions
+- Prometheus metrics cover API, core search, ANN, cache, disk store, and persistence health
+- a minimal Kubernetes manifest can run LumenVec with a persistent volume
+- backup and restore are documented and tested at least at single-node level
+- graceful shutdown is tested for HTTP and gRPC
+- cloud readiness work does not regress search benchmarks
+
+Risks:
+
+- premature multi-node design could distract from single-node correctness
+- API versioning can create compatibility burden if introduced before error and payload shapes are stable
+- cloud deployment examples can become stale if not validated in CI or a reproducible local cluster
+
 ## Execution Order
 
 Recommended order:
@@ -313,8 +374,11 @@ Recommended order:
 4. Phase 4
 5. Phase 5
 6. Phase 6
+7. Phase 7
 
 gRPC can start in parallel after Phase 1 if transport work must begin early, but storage and ANN refactors still have higher impact on end-to-end performance.
+
+Cloud readiness can start in parallel after the public API shape is stable enough to document. It should begin with contracts, health checks, observability, and deployment packaging before any multi-node or distributed-storage work.
 
 ## Backlog by Milestone
 
@@ -358,6 +422,33 @@ gRPC can start in parallel after Phase 1 if transport work must begin early, but
 - recovery and race tests
 - documentation updates
 - operational rollout notes
+- REST API contract and cloud integration guide
+
+### Milestone G: External vector database benchmark
+
+- document benchmark methodology and fairness rules
+- build deterministic dataset and query generation
+- implement LumenVec exact and ANN benchmark adapters
+- add a ground-truth path for recall calculation
+- add Qdrant and pgvector Docker-based comparisons; Qdrant plus pgvector exact, HNSW, and IVFFlat are implemented
+- add Faiss as an in-process baseline
+- generate JSON, CSV, and Markdown reports
+- add named benchmark presets such as `smoke`, `local-10k`, `searchbatch`, and focused engine subsets
+- generate automatic summary reports with recall-filtered rankings for ingest, search QPS, batch-search QPS, memory, and disk
+- add baseline comparison and regression detection for repeated local runs
+- separate publishable result snapshots from diagnostic and temporary benchmark outputs
+- extend later to Milvus and a separately labeled Pinecone managed-service run; Weaviate and Chroma Docker adapters are implemented
+
+### Milestone H: Cloud-ready single-node deployment
+
+- define `/v1` REST API contract and OpenAPI spec
+- standardize HTTP and gRPC error contracts
+- split health endpoints into liveness and readiness
+- add structured request logging and request IDs
+- document TLS/auth deployment patterns for cloud environments
+- add Kubernetes manifests for single-node persistent-volume deployment
+- document non-root volume ownership, backup, restore, and graceful shutdown
+- validate that cloud packaging changes do not regress benchmark search results
 
 ## Definition of Done
 
