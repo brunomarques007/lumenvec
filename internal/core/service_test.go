@@ -430,6 +430,84 @@ func TestServiceSearchBatchANNAndAccumulatorEdgeCases(t *testing.T) {
 	}
 }
 
+func TestServiceSearchBatchExactParallelMatchesSerial(t *testing.T) {
+	prev := runtime.GOMAXPROCS(4)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+
+	svc := newCoreService(t, "exact")
+	vectors := make([]index.Vector, 0, 12)
+	for i := 0; i < 12; i++ {
+		vectors = append(vectors, index.Vector{
+			ID:     fmt.Sprintf("vec-%02d", i),
+			Values: []float64{float64(i), float64(i % 3), 1},
+		})
+	}
+	if err := svc.AddVectors(vectors); err != nil {
+		t.Fatalf("AddVectors() error = %v", err)
+	}
+
+	queries := make([]BatchSearchQuery, 0, exactBatchDistanceWidth*2+1)
+	for i := 0; i < exactBatchDistanceWidth*2+1; i++ {
+		queries = append(queries, BatchSearchQuery{
+			ID:     fmt.Sprintf("q-%02d", i),
+			Values: []float64{float64(i), float64(i % 3), 1},
+			K:      1,
+		})
+	}
+
+	got, err := svc.SearchBatch(queries)
+	if err != nil {
+		t.Fatalf("SearchBatch() error = %v", err)
+	}
+	if len(got) != len(queries) {
+		t.Fatalf("result count = %d, want %d", len(got), len(queries))
+	}
+	for i, query := range queries {
+		want, err := svc.Search(query.Values, query.K)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if got[i].ID != query.ID {
+			t.Fatalf("result %d ID = %q, want %q", i, got[i].ID, query.ID)
+		}
+		if !slices.Equal(got[i].Results, want) {
+			t.Fatalf("result %d = %+v, want %+v", i, got[i].Results, want)
+		}
+	}
+}
+
+func TestServiceSearchBatchANNSerialAndErrorBranches(t *testing.T) {
+	prev := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+
+	svc := newCoreService(t, "ann")
+	if err := svc.AddVectors([]index.Vector{
+		{ID: "a", Values: []float64{1, 2, 3}},
+		{ID: "b", Values: []float64{2, 3, 4}},
+	}); err != nil {
+		t.Fatalf("AddVectors() error = %v", err)
+	}
+	got, err := svc.SearchBatch([]BatchSearchQuery{
+		{ID: "q-a", Values: []float64{1, 2, 3}, K: 1},
+		{ID: "q-b", Values: []float64{2, 3, 4}, K: 1},
+	})
+	if err != nil {
+		t.Fatalf("SearchBatch() error = %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "q-a" || got[1].ID != "q-b" {
+		t.Fatalf("unexpected serial ANN batch results: %+v", got)
+	}
+
+	runtime.GOMAXPROCS(4)
+	_, err = svc.searchBatchANN([]preparedBatchQuery{
+		{id: "bad", vals: nil, acc: newTopKAccumulator(1)},
+		{id: "ok", vals: []float64{1, 2, 3}, acc: newTopKAccumulator(1)},
+	})
+	if !errors.Is(err, ErrInvalidValues) {
+		t.Fatalf("expected ErrInvalidValues, got %v", err)
+	}
+}
+
 func TestServicePersistenceHelpers(t *testing.T) {
 	svc := newCoreService(t, "exact")
 	if err := svc.AddVector("a", []float64{1, 2, 3}); err != nil {
