@@ -429,6 +429,20 @@ go run ./benchmarks/runner/cmd/matrix \
 
 Comparison flags a row as a regression when search QPS or native batch-search QPS drops by more than `5%`, p95 or p99 increases by more than `5%`, or recall@10 drops below the baseline. Ingest deltas are reported but do not override a search regression.
 
+Pre-PR regression gate:
+
+```powershell
+.\scripts\benchmark-regression-gate.ps1
+```
+
+Unix-like shell:
+
+```bash
+make benchmark-gate
+```
+
+This gate runs a focused Docker matrix for LumenVec HTTP/gRPC exact and ANN quality using the local `10k / 128d / c4 / k10` shape, then fails if `comparison.csv` contains any regression row. It is intentionally smaller than the full matrix and is meant for cloud-readiness, API, transport, persistence, and search-adjacent changes. Run the full matrix before publishing benchmark claims or merging changes that alter search/index behavior.
+
 Use `--search-batch-sizes` to diagnose native batch-search behavior separately from ingest batching:
 
 ```bash

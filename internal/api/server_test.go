@@ -2,12 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -158,6 +160,101 @@ func TestServerHandlersLifecycleAndBatch(t *testing.T) {
 	}
 }
 
+func TestServerV1RoutesUseJSONErrorEnvelope(t *testing.T) {
+	server := newAPITestServer(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/vectors", bytes.NewBufferString(`{"id":"a","values":[1,2,3]}`))
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/vectors/search", bytes.NewBufferString(`{"values":[1,2,3],"k":1}`))
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var hits []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hits); err != nil {
+		t.Fatalf("json.Unmarshal() search response: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != "a" {
+		t.Fatalf("unexpected v1 search results: %+v", hits)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/vectors", bytes.NewBufferString(`{"id":"","values":[1]}`))
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != contentTypeJSON {
+		t.Fatalf("expected JSON content type, got %q", got)
+	}
+	var payload errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error envelope: %v", err)
+	}
+	if payload.Error.Code != "invalid_argument" || payload.Error.Message != "id is required" {
+		t.Fatalf("unexpected error envelope: %+v", payload)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/vectors/missing", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() not found envelope: %v", err)
+	}
+	if payload.Error.Code != "not_found" {
+		t.Fatalf("unexpected not found envelope: %+v", payload)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/vectors/", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected empty ID 404, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() empty ID envelope: %v", err)
+	}
+	if payload.Error.Code != "not_found" {
+		t.Fatalf("unexpected empty ID envelope: %+v", payload)
+	}
+}
+
+func TestRouterReturnsRequestIDHeader(t *testing.T) {
+	server := newAPITestServer(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	req.Header.Set(requestIDHeader, "external-id-123")
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Header().Get(requestIDHeader); got != "external-id-123" {
+		t.Fatalf("expected echoed request id, got %q", got)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/vectors", bytes.NewBufferString(`{`))
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if got := rec.Header().Get(requestIDHeader); got == "" {
+		t.Fatal("expected generated request id")
+	}
+}
+
 func TestServerValidationErrors(t *testing.T) {
 	server := newAPITestServer(t)
 
@@ -201,6 +298,27 @@ func TestHealthRouterAndStatusMapping(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/livez", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
+		t.Fatalf("expected livez ok, got code=%d body=%q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "ready" {
+		t.Fatalf("expected readyz ready, got code=%d body=%q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/readyz", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "ready" {
+		t.Fatalf("expected v1 readyz ready, got code=%d body=%q", rec.Code, rec.Body.String())
+	}
+
 	if got := statusFromServiceError(core.ErrInvalidValues); got != http.StatusBadRequest {
 		t.Fatalf("unexpected status %d", got)
 	}
@@ -223,6 +341,41 @@ func TestHealthRouterAndStatusMapping(t *testing.T) {
 	httpServer := server.httpServer()
 	if httpServer.Addr != server.port || httpServer.Handler == nil {
 		t.Fatal("expected configured http server")
+	}
+}
+
+func TestReadinessHandlerReportsStorageFailure(t *testing.T) {
+	base := t.TempDir()
+	notDir := filepath.Join(base, "not-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	server := NewServerWithOptions(ServerOptions{
+		Port:         ":0",
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		MaxBodyBytes: 1 << 20,
+		MaxVectorDim: 16,
+		MaxK:         5,
+		SnapshotPath: filepath.Join(notDir, "snapshot.json"),
+		WALPath:      filepath.Join(notDir, "wal.log"),
+		VectorStore:  "memory",
+		VectorPath:   filepath.Join(base, "vectors"),
+		SearchMode:   "exact",
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/readyz", nil)
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+	var payload errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() readiness error: %v", err)
+	}
+	if payload.Error.Code != "not_ready" {
+		t.Fatalf("unexpected readiness error: %+v", payload)
 	}
 }
 
@@ -388,6 +541,45 @@ func TestServerStartWithHTTPSTLS(t *testing.T) {
 	server.Start()
 	if !tlsCalled {
 		t.Fatal("expected https start path")
+	}
+}
+
+func TestServerRunStopsHTTPOnContextCancel(t *testing.T) {
+	server := newAPITestServer(t)
+
+	oldListen := listenAndServeFunc
+	oldPrintf := logPrintfAPI
+	t.Cleanup(func() {
+		listenAndServeFunc = oldListen
+		logPrintfAPI = oldPrintf
+	})
+
+	listening := make(chan struct{})
+	release := make(chan struct{})
+	logPrintfAPI = func(string, ...interface{}) {}
+	listenAndServeFunc = func(*http.Server) error {
+		close(listening)
+		<-release
+		return http.ErrServerClosed
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Run(ctx)
+	}()
+
+	<-listening
+	cancel()
+	close(release)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected Run to stop after context cancel")
 	}
 }
 

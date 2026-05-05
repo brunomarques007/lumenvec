@@ -311,6 +311,10 @@ Acceptance criteria:
 Objective:
 Make LumenVec suitable for cloud deployment, managed platform integration, and repeatable production operations without weakening the current search performance focus.
 
+Detailed plan:
+
+- [Cloud Readiness Plan](cloud-readiness-plan.md)
+
 Principles:
 
 - search performance and recall remain the primary product advantage

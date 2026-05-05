@@ -1,6 +1,10 @@
 package api
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/http"
 	"strconv"
@@ -12,6 +16,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+const requestIDHeader = "X-Request-ID"
+
+type requestIDContextKey struct{}
 
 type statusRecorder struct {
 	http.ResponseWriter
@@ -110,7 +118,7 @@ func getClientIP(r *http.Request) string {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.authEnabled || s.apiKey == "" || r.URL.Path == "/health" || r.URL.Path == "/metrics" {
+		if !s.authEnabled || s.apiKey == "" || isPublicOperationalPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -118,7 +126,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		key := authKeyFromHTTPRequest(r)
 
 		if !validateAPIKey(key, s.apiKey) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeError(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -127,17 +135,72 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.rateLimiter == nil || r.URL.Path == "/health" || r.URL.Path == "/metrics" {
+		if s.rateLimiter == nil || isPublicOperationalPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		ip := s.getClientIP(r)
 		if !s.rateLimiter.allow(ip) {
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			writeError(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(requestIDContextKey{}).(string)
+	return id
+}
+
+func requestIDFromRequest(r *http.Request) string {
+	id := strings.TrimSpace(r.Header.Get(requestIDHeader))
+	if id == "" || len(id) > 128 {
+		return ""
+	}
+	for _, ch := range id {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= '0' && ch <= '9':
+		case ch == '-', ch == '_', ch == '.', ch == ':', ch == '/':
+		default:
+			return ""
+		}
+	}
+	return id
+}
+
+func newRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := requestIDFromRequest(r)
+		if requestID == "" {
+			requestID = newRequestID()
+		}
+		w.Header().Set(requestIDHeader, requestID)
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func isPublicOperationalPath(path string) bool {
+	switch path {
+	case "/health", "/livez", "/readyz", "/v1/health", "/v1/livez", "/v1/readyz", "/metrics":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
@@ -164,9 +227,35 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		logPrintfAPI(`{"event":"http_request","method":"%s","path":"%s","status":%d,"duration_ms":%d}`,
-			r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds())
+		writeAccessLog(r, rec.status, time.Since(start))
 	})
+}
+
+func writeAccessLog(r *http.Request, status int, duration time.Duration) {
+	payload := struct {
+		Event      string `json:"event"`
+		RequestID  string `json:"request_id"`
+		Method     string `json:"method"`
+		Path       string `json:"path"`
+		Status     int    `json:"status"`
+		DurationMS int64  `json:"duration_ms"`
+		ClientAddr string `json:"client_addr"`
+	}{
+		Event:      "http_request",
+		RequestID:  requestIDFromContext(r.Context()),
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		Status:     status,
+		DurationMS: duration.Milliseconds(),
+		ClientAddr: getClientIP(r),
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		logPrintfAPI(`{"event":"http_request","request_id":"%s","method":"%s","path":"%s","status":%d,"duration_ms":%d,"client_addr":"%s"}`,
+			payload.RequestID, payload.Method, payload.Path, payload.Status, payload.DurationMS, payload.ClientAddr)
+		return
+	}
+	logPrintfAPI("%s", out)
 }
 
 type coreMetricsCollector struct {
