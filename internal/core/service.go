@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -418,17 +419,43 @@ func (s *Service) SearchBatch(queries []BatchSearchQuery) ([]BatchSearchResult, 
 	}
 
 	if s.searchMode == "ann" {
-		results := make([]BatchSearchResult, 0, len(prepared))
-		for _, query := range prepared {
-			hits, err := s.Search(query.vals, query.acc.limit)
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, BatchSearchResult{ID: query.id, Results: hits})
-		}
-		return results, nil
+		return s.searchBatchANN(prepared)
+	}
+	if len(prepared) >= exactBatchDistanceWidth*2 && runtime.GOMAXPROCS(0) > 1 {
+		return s.searchBatchExactParallel(prepared), nil
+	}
+	return s.searchBatchExactSerial(prepared), nil
+}
+
+func (s *Service) searchBatchExactParallel(prepared []preparedBatchQuery) []BatchSearchResult {
+	workers := min(runtime.GOMAXPROCS(0), len(prepared)/exactBatchDistanceWidth)
+	if workers <= 1 {
+		return s.searchBatchExactSerial(prepared)
+	}
+	chunkSize := (len(prepared) + workers - 1) / workers
+	if rem := chunkSize % exactBatchDistanceWidth; rem != 0 {
+		chunkSize += exactBatchDistanceWidth - rem
 	}
 
+	var wg sync.WaitGroup
+	for start := 0; start < len(prepared); start += chunkSize {
+		end := min(start+chunkSize, len(prepared))
+		wg.Add(1)
+		go func(batch []preparedBatchQuery) {
+			defer wg.Done()
+			s.scanExactBatch(batch)
+		}(prepared[start:end])
+	}
+	wg.Wait()
+	return batchResultsFromPrepared(prepared)
+}
+
+func (s *Service) searchBatchExactSerial(prepared []preparedBatchQuery) []BatchSearchResult {
+	s.scanExactBatch(prepared)
+	return batchResultsFromPrepared(prepared)
+}
+
+func (s *Service) scanExactBatch(prepared []preparedBatchQuery) {
 	s.rangeExactVectors(func(id string, values []float32) bool {
 		for i := 0; i+exactBatchDistanceWidth <= len(prepared); i += exactBatchDistanceWidth {
 			q0 := prepared[i].vals32
@@ -460,13 +487,59 @@ func (s *Service) SearchBatch(queries []BatchSearchQuery) ([]BatchSearchResult, 
 		}
 		return true
 	})
+}
 
+func batchResultsFromPrepared(prepared []preparedBatchQuery) []BatchSearchResult {
 	results := make([]BatchSearchResult, len(prepared))
 	for i, query := range prepared {
 		results[i] = BatchSearchResult{
 			ID:      query.id,
 			Results: query.acc.Results(),
 		}
+	}
+	return results
+}
+
+func (s *Service) searchBatchANN(prepared []preparedBatchQuery) ([]BatchSearchResult, error) {
+	results := make([]BatchSearchResult, len(prepared))
+	workers := min(len(prepared), runtime.GOMAXPROCS(0))
+	if workers <= 1 {
+		for i, query := range prepared {
+			hits, err := s.Search(query.vals, query.acc.limit)
+			if err != nil {
+				return nil, err
+			}
+			results[i] = BatchSearchResult{ID: query.id, Results: hits}
+		}
+		return results, nil
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var errOnce sync.Once
+	var firstErr error
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				query := prepared[i]
+				hits, err := s.Search(query.vals, query.acc.limit)
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					continue
+				}
+				results[i] = BatchSearchResult{ID: query.id, Results: hits}
+			}
+		}()
+	}
+	for i := range prepared {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return results, nil
 }

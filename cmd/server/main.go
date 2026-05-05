@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -8,7 +9,9 @@ import (
 	"lumenvec/internal/config"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -87,10 +90,15 @@ func buildServer(configPath string) (*api.Server, error) {
 
 type serverRunner interface {
 	Start()
+	Run(context.Context) error
 }
 
 func runServer(server serverRunner) {
-	server.Start()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := server.Run(ctx); err != nil {
+		logFatalf("server stopped with error: %v", err)
+	}
 }
 
 func resolveConfigPath() string {

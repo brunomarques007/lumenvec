@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/google/btree v1.1.3
 	github.com/gorilla/mux v1.8.0
+	github.com/lib/pq v1.12.3
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.80.0

@@ -1,6 +1,6 @@
 APP_NAME=lumenvec
 
-.PHONY: test vet build run bench tidy coverage proto docker-build compose-up compose-down compose-validate loadgen release-assets
+.PHONY: test vet build run bench tidy coverage proto docker-build compose-up compose-down compose-validate benchmark-gate loadgen release-assets
 
 test:
 	go test ./...
@@ -37,6 +37,9 @@ compose-down:
 
 compose-validate:
 	bash scripts/validate-observability.sh
+
+benchmark-gate:
+	bash scripts/benchmark-regression-gate.sh
 
 loadgen:
 	go run ./tools/loadgen

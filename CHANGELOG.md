@@ -6,6 +6,17 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [v0.2.7] - 2026-04-25
+
+Automated release from `v0.2.6` to `v0.2.7`.
+
+### Commits
+- Improve test coverage and docs (1197818)
+- docs: clarify transport guidance and contribution workflow (52a12a0)
+- perf(http): streamline server and client transport paths (5b2babd)
+- feat(core): add paginated listing and optimize vector engine hot paths (f9cb22b)
+
+
 ## [v0.2.5] - 2026-04-12
 
 Automated release from `v0.2.4` to `v0.2.5`.

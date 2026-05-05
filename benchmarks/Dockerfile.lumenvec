@@ -1,0 +1,43 @@
+FROM golang:1.26 AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/lumenvec ./cmd/server
+
+FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.title="LumenVec Benchmark" \
+      org.opencontainers.image.description="Benchmark runtime image for LumenVec with writable persistent /data" \
+      org.opencontainers.image.licenses="MIT"
+
+RUN useradd --system --uid 65532 --gid 65534 --home-dir /nonexistent --shell /usr/sbin/nologin lumenvec \
+    && mkdir -p /app/configs /data \
+    && chown -R 65532:65534 /app /data
+
+WORKDIR /app
+
+COPY --from=builder --chown=65532:65534 /out/lumenvec /app/lumenvec
+COPY --chown=65532:65534 configs/config.yaml /app/configs/config.yaml
+COPY --chown=65532:65534 configs/config.grpc.yaml /app/configs/config.grpc.yaml
+COPY --chown=0:0 benchmarks/entrypoint.sh /entrypoint.sh
+
+RUN chmod 0755 /entrypoint.sh
+
+EXPOSE 19190
+EXPOSE 19191
+
+VOLUME ["/data"]
+
+ENV VECTOR_DB_CONFIG=/app/configs/config.yaml \
+    VECTOR_DB_PROTOCOL=http \
+    VECTOR_DB_PORT=19190 \
+    VECTOR_DB_GRPC_PORT=19191 \
+    VECTOR_DB_SNAPSHOT_PATH=/data/snapshot.json \
+    VECTOR_DB_WAL_PATH=/data/wal.log \
+    VECTOR_DB_VECTOR_PATH=/data/vectors
+
+ENTRYPOINT ["/entrypoint.sh"]
