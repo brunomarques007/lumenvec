@@ -6,6 +6,18 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [v0.2.8] - 2026-05-05
+
+Automated release from `v0.2.7` to `v0.2.8`.
+
+### Commits
+- Fix benchmark runner lint (f93ac26)
+- Add cloud readiness foundations (1be3bf8)
+- Restore core coverage for batch search (e1ebd9f)
+- Add vector database benchmark suite (04c9139)
+- Improve service batch search benchmarking (f51de1c)
+
+
 ## [v0.2.7] - 2026-04-25
 
 Automated release from `v0.2.6` to `v0.2.7`.

@@ -36,6 +36,36 @@ func BenchmarkServiceAddVector(b *testing.B) {
 	}
 }
 
+func BenchmarkServiceAddVectorsIngest(b *testing.B) {
+	for _, mode := range []string{"exact", "ann"} {
+		for _, batchSize := range []int{100, 500, 1000} {
+			b.Run(fmt.Sprintf("%s_batch_%d", mode, batchSize), func(b *testing.B) {
+				svc := benchmarkService(b, mode)
+				batches := make([][]index.Vector, b.N)
+				for i := 0; i < b.N; i++ {
+					vectors := make([]index.Vector, 0, batchSize)
+					base := i * batchSize
+					for j := 0; j < batchSize; j++ {
+						n := base + j
+						vectors = append(vectors, index.Vector{
+							ID:     fmt.Sprintf("vec-%d", n),
+							Values: benchmarkVector(256, float64(n%31)),
+						})
+					}
+					batches[i] = vectors
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := svc.AddVectors(batches[i]); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkServiceAddVectorSyncEvery(b *testing.B) {
 	for _, syncEvery := range []int{1, 64} {
 		b.Run(fmt.Sprintf("sync_every_%d", syncEvery), func(b *testing.B) {
@@ -233,6 +263,50 @@ func BenchmarkServiceSearchBatch(b *testing.B) {
 		batchQueries = append(batchQueries, BatchSearchQuery{
 			ID:     fmt.Sprintf("q-%d", i),
 			Values: benchmarkVector(256, float64(i)),
+			K:      10,
+		})
+	}
+
+	b.Run("single_x16", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			for j := 0; j < 16; j++ {
+				if _, err := svc.Search(singleQuery, 10); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+
+	b.Run("batch_16", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := svc.SearchBatch(batchQueries); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkServiceSearchBatchANN(b *testing.B) {
+	svc := benchmarkService(b, "ann")
+	vectors := make([]index.Vector, 0, 2048)
+	for i := 0; i < 2048; i++ {
+		vectors = append(vectors, index.Vector{
+			ID:     fmt.Sprintf("vec-%d", i),
+			Values: benchmarkVector(256, float64(i%31)),
+		})
+	}
+	if err := svc.AddVectors(vectors); err != nil {
+		b.Fatal(err)
+	}
+
+	singleQuery := benchmarkVector(256, 5)
+	batchQueries := make([]BatchSearchQuery, 0, 16)
+	for i := 0; i < 16; i++ {
+		batchQueries = append(batchQueries, BatchSearchQuery{
+			ID:     fmt.Sprintf("q-%d", i),
+			Values: benchmarkVector(256, float64(i%13)),
 			K:      10,
 		})
 	}

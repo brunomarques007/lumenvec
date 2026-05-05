@@ -49,6 +49,8 @@ Compose with Prometheus and Grafana:
 docker compose up --build
 ```
 
+Kubernetes single-node examples are available in [deploy/kubernetes](deploy/kubernetes). Cloud deployment notes are in [docs/cloud.md](docs/cloud.md).
+
 ## Configuration
 
 Default config: [configs/config.yaml](configs/config.yaml)
@@ -112,6 +114,8 @@ curl "http://localhost:19190/vectors?cursor=<next_cursor>&ids_only=true"
 Endpoints:
 
 - `GET /health`
+- `GET /livez`
+- `GET /readyz`
 - `GET /metrics`
 - `GET /vectors?limit=&cursor=&after=&ids_only=`
 - `POST /vectors`
@@ -171,11 +175,21 @@ go test ./internal/api -run ^$ -bench BenchmarkTransport -benchmem
 go test ./internal/index/ann -run ^$ -bench "BenchmarkAnnSearch(Tuning)?$" -benchmem
 ```
 
+External benchmark planning:
+
+- [benchmarks/README.md](benchmarks/README.md)
+- [benchmarks/methodology.md](benchmarks/methodology.md)
+- [benchmarks/result_schema.md](benchmarks/result_schema.md)
+
 More details:
 
 - [docs/architecture.md](docs/architecture.md)
+- [docs/api.md](docs/api.md)
+- [docs/cloud.md](docs/cloud.md)
 - [docs/design.md](docs/design.md)
+- [docs/cloud-readiness-plan.md](docs/cloud-readiness-plan.md)
 - [docs/observability.md](docs/observability.md)
+- [docs/operations.md](docs/operations.md)
 - [docs/testing.md](docs/testing.md)
 - [docs/roadmap.md](docs/roadmap.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)

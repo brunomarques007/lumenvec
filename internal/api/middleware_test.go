@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,10 @@ import (
 	"testing"
 	"time"
 )
+
+func contextWithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDContextKey{}, requestID)
+}
 
 func newMiddlewareServer(t *testing.T, apiKey string) *Server {
 	t.Helper()
@@ -131,6 +136,39 @@ func TestRateLimitAndMetricsMiddleware(t *testing.T) {
 	}
 }
 
+func TestRequestIDMiddleware(t *testing.T) {
+	server := newMiddlewareServer(t, "")
+	handler := server.requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requestIDFromContext(r.Context()) == "" {
+			t.Fatal("expected request id in context")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/vectors", nil)
+	req.Header.Set(requestIDHeader, "client-request-1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get(requestIDHeader); got != "client-request-1" {
+		t.Fatalf("expected client request id to be returned, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/vectors", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get(requestIDHeader); got == "" || got == "client-request-1" {
+		t.Fatalf("expected generated request id, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/vectors", nil)
+	req.Header.Set(requestIDHeader, "bad request id")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get(requestIDHeader); got == "" || got == "bad request id" {
+		t.Fatalf("expected invalid request id to be replaced, got %q", got)
+	}
+}
+
 func TestRateLimiterBranches(t *testing.T) {
 	if newRateLimiter(0, time.Second) != nil {
 		t.Fatal("expected disabled limiter for non-positive limit")
@@ -182,6 +220,13 @@ func TestMiddlewarePublicPathsAndAccessLog(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/readyz", nil)
+	auth.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for public readiness, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/vectors", nil)
 	req.Header.Set("X-API-Key", "secret")
 	auth.ServeHTTP(rec, req)
@@ -220,9 +265,23 @@ func TestMiddlewarePublicPathsAndAccessLog(t *testing.T) {
 	}))
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/x", nil)
+	req = req.WithContext(contextWithRequestID(req.Context(), "log-request-1"))
+	req.RemoteAddr = "10.0.0.1:9999"
 	access.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted || buf.Len() == 0 {
 		t.Fatal("expected access log output when enabled")
+	}
+	logLine := buf.String()
+	for _, want := range []string{
+		`"request_id":"log-request-1"`,
+		`"method":"GET"`,
+		`"path":"/x"`,
+		`"status":202`,
+		`"client_addr":"10.0.0.1"`,
+	} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("expected access log to contain %q, got %q", want, logLine)
+		}
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)

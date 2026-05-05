@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,10 +13,16 @@ import (
 
 type fakeRunner struct {
 	called bool
+	err    error
 }
 
 func (f *fakeRunner) Start() {
 	f.called = true
+}
+
+func (f *fakeRunner) Run(context.Context) error {
+	f.called = true
+	return f.err
 }
 
 func TestBuildServer(t *testing.T) {
@@ -119,7 +126,19 @@ func TestRunServer(t *testing.T) {
 	runner := &fakeRunner{}
 	runServer(runner)
 	if !runner.called {
-		t.Fatal("expected Start to be called")
+		t.Fatal("expected Run to be called")
+	}
+}
+
+func TestRunServerFatalOnError(t *testing.T) {
+	oldFatalf := logFatalf
+	t.Cleanup(func() { logFatalf = oldFatalf })
+
+	var fatalCalled bool
+	logFatalf = func(string, ...interface{}) { fatalCalled = true }
+	runServer(&fakeRunner{err: errors.New("boom")})
+	if !fatalCalled {
+		t.Fatal("expected fatal path")
 	}
 }
 
