@@ -437,30 +437,29 @@ func aggregate(paths []string) ([]aggregateRow, error) {
 func writeReport(cfg config, rows []aggregateRow) error {
 	path := filepath.Join(cfg.outputDir, "report.md")
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("# Benchmark Matrix Report: %dk / %dd / c%d / k%d\n\n", cfg.vectors/1000, cfg.dim, cfg.concurrent, cfg.k))
+	fmt.Fprintf(&b, "# Benchmark Matrix Report: %dk / %dd / c%d / k%d\n\n", cfg.vectors/1000, cfg.dim, cfg.concurrent, cfg.k)
 	b.WriteString("This report aggregates repeated local Docker-service benchmark runs using the median value per row.\n\n")
 	b.WriteString("## Scenario\n\n")
-	b.WriteString(fmt.Sprintf("- Runs per row: `%d`\n", cfg.runs))
-	b.WriteString(fmt.Sprintf("- Vectors: `%d`\n", cfg.vectors))
-	b.WriteString(fmt.Sprintf("- Dimensions: `%d`\n", cfg.dim))
-	b.WriteString(fmt.Sprintf("- Queries: `%d`\n", cfg.queries))
-	b.WriteString(fmt.Sprintf("- Warmup queries: `%d`\n", cfg.warmup))
-	b.WriteString(fmt.Sprintf("- Search concurrency: `%d`\n", cfg.concurrent))
+	fmt.Fprintf(&b, "- Runs per row: `%d`\n", cfg.runs)
+	fmt.Fprintf(&b, "- Vectors: `%d`\n", cfg.vectors)
+	fmt.Fprintf(&b, "- Dimensions: `%d`\n", cfg.dim)
+	fmt.Fprintf(&b, "- Queries: `%d`\n", cfg.queries)
+	fmt.Fprintf(&b, "- Warmup queries: `%d`\n", cfg.warmup)
+	fmt.Fprintf(&b, "- Search concurrency: `%d`\n", cfg.concurrent)
 	if cfg.searchBatchSizes != "" {
-		b.WriteString(fmt.Sprintf("- Search batch sizes: `%s`\n", cfg.searchBatchSizes))
+		fmt.Fprintf(&b, "- Search batch sizes: `%s`\n", cfg.searchBatchSizes)
 	} else {
-		b.WriteString(fmt.Sprintf("- Search batch size: `%d`\n", cfg.searchBatchSize))
+		fmt.Fprintf(&b, "- Search batch size: `%d`\n", cfg.searchBatchSize)
 	}
-	b.WriteString(fmt.Sprintf("- Top-k: `%d`\n", cfg.k))
-	b.WriteString(fmt.Sprintf("- Batch sizes: `%s`\n", cfg.batchSizes))
+	fmt.Fprintf(&b, "- Top-k: `%d`\n", cfg.k)
+	fmt.Fprintf(&b, "- Batch sizes: `%s`\n", cfg.batchSizes)
 	b.WriteString("- Isolation model: Docker services\n")
 	b.WriteString("- Storage model: Docker-managed persistent volumes\n\n")
 	b.WriteString("## Median Results\n\n")
 	b.WriteString("| Engine | Profile | Transport | Ingest batch | Search batch | Runs | Median ingest vectors/s | Median index build ms | Median search QPS | Median batch search QPS | Median batch p95 ms | Median p50 ms | Median p95 ms | Median p99 ms | Median Recall@1 | Median Recall@5 | Median Recall@10 | Median memory MiB | Median CPU % | Median disk MiB |\n")
 	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, row := range rows {
-		b.WriteString(fmt.Sprintf(
-			"| %s | %s | %s | %d | %d | %d | %.2f | %.3f | %.2f | %.2f | %.3f | %.3f | %.3f | %.3f | %.4f | %.4f | %.4f | %.2f | %.2f | %.2f |\n",
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %d | %.2f | %.3f | %.2f | %.2f | %.3f | %.3f | %.3f | %.3f | %.4f | %.4f | %.4f | %.2f | %.2f | %.2f |\n",
 			row.Engine,
 			row.Profile,
 			row.Transport,
@@ -480,8 +479,7 @@ func writeReport(cfg config, rows []aggregateRow) error {
 			row.Recall10Median,
 			row.MemoryMedian,
 			row.CPUMedian,
-			row.DiskMedian,
-		))
+			row.DiskMedian)
 	}
 	writeRankings(&b, rows)
 	b.WriteString("\n## Charts\n\n")
@@ -505,7 +503,7 @@ func writeReport(cfg config, rows []aggregateRow) error {
 func writeRankings(b *strings.Builder, rows []aggregateRow) {
 	const recallThreshold = 0.75
 	b.WriteString("\n## Rankings\n\n")
-	b.WriteString(fmt.Sprintf("Search rankings require `recall@10 >= %.2f` so low-recall ANN profiles are not treated as equivalent to exact or higher-quality ANN results.\n\n", recallThreshold))
+	fmt.Fprintf(b, "Search rankings require `recall@10 >= %.2f` so low-recall ANN profiles are not treated as equivalent to exact or higher-quality ANN results.\n\n", recallThreshold)
 	writeRankingTable(b, "Top ingest throughput", topRows(rows, 5, func(row aggregateRow) bool {
 		return true
 	}, func(row aggregateRow) float64 {
@@ -551,7 +549,7 @@ func writeRankings(b *strings.Builder, rows []aggregateRow) {
 }
 
 func writeRankingTable(b *strings.Builder, title string, rows []aggregateRow, unit string, valueFn func(aggregateRow) float64) {
-	b.WriteString(fmt.Sprintf("### %s\n\n", title))
+	fmt.Fprintf(b, "### %s\n\n", title)
 	if len(rows) == 0 {
 		b.WriteString("No rows matched this ranking.\n\n")
 		return
@@ -559,7 +557,7 @@ func writeRankingTable(b *strings.Builder, title string, rows []aggregateRow, un
 	b.WriteString("| Rank | Engine | Profile | Transport | Ingest batch | Search batch | Value | Recall@10 |\n")
 	b.WriteString("|---:|---|---|---|---:|---:|---:|---:|\n")
 	for i, row := range rows {
-		b.WriteString(fmt.Sprintf(
+		fmt.Fprintf(b,
 			"| %d | %s | %s | %s | %d | %d | %.2f %s | %.4f |\n",
 			i+1,
 			row.Engine,
@@ -569,8 +567,7 @@ func writeRankingTable(b *strings.Builder, title string, rows []aggregateRow, un
 			row.SearchBatchSize,
 			valueFn(row),
 			unit,
-			row.Recall10Median,
-		))
+			row.Recall10Median)
 	}
 	b.WriteString("\n")
 }
@@ -775,23 +772,22 @@ func writeComparisonReport(cfg config, rows []comparisonRow) error {
 	path := filepath.Join(cfg.outputDir, "comparison.md")
 	var b strings.Builder
 	b.WriteString("# Benchmark Baseline Comparison\n\n")
-	b.WriteString(fmt.Sprintf("- Baseline directory: `%s`\n", filepath.ToSlash(cfg.compareDir)))
-	b.WriteString(fmt.Sprintf("- Candidate directory: `%s`\n", filepath.ToSlash(cfg.outputDir)))
+	fmt.Fprintf(&b, "- Baseline directory: `%s`\n", filepath.ToSlash(cfg.compareDir))
+	fmt.Fprintf(&b, "- Candidate directory: `%s`\n", filepath.ToSlash(cfg.outputDir))
 	b.WriteString("- Regression rule: search QPS or batch-search QPS below `-5%`, p95 or p99 above `+5%`, or recall@10 below baseline.\n\n")
 	counts := make(map[string]int)
 	for _, row := range rows {
 		counts[row.Status]++
 	}
 	b.WriteString("## Summary\n\n")
-	b.WriteString(fmt.Sprintf("- Regressions: `%d`\n", counts["regression"]))
-	b.WriteString(fmt.Sprintf("- Improvements or neutral rows: `%d`\n", counts["ok"]))
-	b.WriteString(fmt.Sprintf("- New rows: `%d`\n\n", counts["new"]))
+	fmt.Fprintf(&b, "- Regressions: `%d`\n", counts["regression"])
+	fmt.Fprintf(&b, "- Improvements or neutral rows: `%d`\n", counts["ok"])
+	fmt.Fprintf(&b, "- New rows: `%d`\n\n", counts["new"])
 	b.WriteString("## Rows\n\n")
 	b.WriteString("| Status | Engine | Profile | Transport | Ingest batch | Search batch | Ingest delta % | Search QPS delta % | Batch QPS delta % | p95 delta % | p99 delta % | Recall@10 delta | Notes |\n")
 	b.WriteString("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
 	for _, row := range rows {
-		b.WriteString(fmt.Sprintf(
-			"| %s | %s | %s | %s | %d | %d | %.2f | %.2f | %.2f | %.2f | %.2f | %.4f | %s |\n",
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %d | %d | %.2f | %.2f | %.2f | %.2f | %.2f | %.4f | %s |\n",
 			row.Status,
 			row.Engine,
 			row.Profile,
@@ -804,8 +800,7 @@ func writeComparisonReport(cfg config, rows []comparisonRow) error {
 			row.P95DeltaPct,
 			row.P99DeltaPct,
 			row.Recall10Delta,
-			row.Notes,
-		))
+			row.Notes)
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
@@ -907,8 +902,8 @@ func writeBarChart(path, title, unit string, rows []aggregateRow, valueFn func(a
 		x := left + float64(i)*(barWidth+barGap) + barGap/2
 		barHeight := value / maxValue * plotHeight
 		y := top + plotHeight - barHeight
-		b.WriteString(fmt.Sprintf("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\"/>\n", x, y, barWidth, barHeight, colorForRow(row)))
-		b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" text-anchor=\"end\" transform=\"rotate(-55 %.1f %.1f)\">%s</text>\n", x+barWidth/2, top+plotHeight+18, x+barWidth/2, top+plotHeight+18, html.EscapeString(rowChartLabel(row))))
+		fmt.Fprintf(&b, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\"/>\n", x, y, barWidth, barHeight, colorForRow(row))
+		fmt.Fprintf(&b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" text-anchor=\"end\" transform=\"rotate(-55 %.1f %.1f)\">%s</text>\n", x+barWidth/2, top+plotHeight+18, x+barWidth/2, top+plotHeight+18, html.EscapeString(rowChartLabel(row)))
 	}
 	b.WriteString("</svg>\n")
 	return os.WriteFile(path, []byte(b.String()), 0o644)
@@ -931,15 +926,15 @@ func writeRecallScatter(path string, rows []aggregateRow) error {
 	var b strings.Builder
 	writeSVGHeader(&b, width, height, "Recall@10 vs Search QPS")
 	writeChartFrame(&b, width, height, left, top, plotWidth, plotHeight, "Recall@10 vs Search QPS", "recall@10", 1)
-	b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"12\" text-anchor=\"middle\">search QPS</text>\n", left+plotWidth/2, float64(height)-22))
+	fmt.Fprintf(&b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"12\" text-anchor=\"middle\">search QPS</text>\n", left+plotWidth/2, float64(height)-22)
 	for _, row := range rows {
 		x := left + (row.QPSMedian/maxQPS)*plotWidth
 		y := top + plotHeight - clampFloat(row.Recall10Median, 0, 1)*plotHeight
-		b.WriteString(fmt.Sprintf("<circle cx=\"%.1f\" cy=\"%.1f\" r=\"5\" fill=\"%s\"/>\n", x, y, colorForRow(row)))
-		b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\">%s</text>\n", x+7, y-7, html.EscapeString(rowChartLabel(row))))
+		fmt.Fprintf(&b, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"5\" fill=\"%s\"/>\n", x, y, colorForRow(row))
+		fmt.Fprintf(&b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\">%s</text>\n", x+7, y-7, html.EscapeString(rowChartLabel(row)))
 	}
-	b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" text-anchor=\"middle\">0</text>\n", left, top+plotHeight+16))
-	b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" text-anchor=\"middle\">%.0f</text>\n", left+plotWidth, top+plotHeight+16, maxQPS))
+	fmt.Fprintf(&b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" text-anchor=\"middle\">0</text>\n", left, top+plotHeight+16)
+	fmt.Fprintf(&b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" text-anchor=\"middle\">%.0f</text>\n", left+plotWidth, top+plotHeight+16, maxQPS)
 	b.WriteString("</svg>\n")
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
@@ -968,33 +963,33 @@ func writeResourceChart(path string, rows []aggregateRow) error {
 		x := left + float64(i)*(groupWidth+groupGap) + groupGap/2
 		memHeight := row.MemoryMedian / maxValue * plotHeight
 		diskHeight := row.DiskMedian / maxValue * plotHeight
-		b.WriteString(fmt.Sprintf("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"#2563eb\"/>\n", x, top+plotHeight-memHeight, barWidth, memHeight))
-		b.WriteString(fmt.Sprintf("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"#16a34a\"/>\n", x+barWidth, top+plotHeight-diskHeight, barWidth, diskHeight))
-		b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" text-anchor=\"end\" transform=\"rotate(-55 %.1f %.1f)\">%s</text>\n", x+groupWidth/2, top+plotHeight+18, x+groupWidth/2, top+plotHeight+18, html.EscapeString(rowChartLabel(row))))
+		fmt.Fprintf(&b, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"#2563eb\"/>\n", x, top+plotHeight-memHeight, barWidth, memHeight)
+		fmt.Fprintf(&b, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"#16a34a\"/>\n", x+barWidth, top+plotHeight-diskHeight, barWidth, diskHeight)
+		fmt.Fprintf(&b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" text-anchor=\"end\" transform=\"rotate(-55 %.1f %.1f)\">%s</text>\n", x+groupWidth/2, top+plotHeight+18, x+groupWidth/2, top+plotHeight+18, html.EscapeString(rowChartLabel(row)))
 	}
-	b.WriteString(fmt.Sprintf("<rect x=\"%.1f\" y=\"20\" width=\"12\" height=\"12\" fill=\"#2563eb\"/><text x=\"%.1f\" y=\"31\" font-size=\"12\">memory</text>\n", float64(width)-168, float64(width)-150))
-	b.WriteString(fmt.Sprintf("<rect x=\"%.1f\" y=\"20\" width=\"12\" height=\"12\" fill=\"#16a34a\"/><text x=\"%.1f\" y=\"31\" font-size=\"12\">disk</text>\n", float64(width)-90, float64(width)-72))
+	fmt.Fprintf(&b, "<rect x=\"%.1f\" y=\"20\" width=\"12\" height=\"12\" fill=\"#2563eb\"/><text x=\"%.1f\" y=\"31\" font-size=\"12\">memory</text>\n", float64(width)-168, float64(width)-150)
+	fmt.Fprintf(&b, "<rect x=\"%.1f\" y=\"20\" width=\"12\" height=\"12\" fill=\"#16a34a\"/><text x=\"%.1f\" y=\"31\" font-size=\"12\">disk</text>\n", float64(width)-90, float64(width)-72)
 	b.WriteString("</svg>\n")
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 func writeSVGHeader(b *strings.Builder, width, height int, title string) {
-	b.WriteString(fmt.Sprintf("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\" role=\"img\" aria-label=\"%s\">\n", width, height, width, height, html.EscapeString(title)))
+	fmt.Fprintf(b, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\" role=\"img\" aria-label=\"%s\">\n", width, height, width, height, html.EscapeString(title))
 	b.WriteString("<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n")
 }
 
 func writeChartFrame(b *strings.Builder, width, height int, left, top, plotWidth, plotHeight float64, title, unit string, maxValue float64) {
-	b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"34\" font-size=\"20\" font-family=\"Arial, sans-serif\" font-weight=\"700\">%s</text>\n", left, html.EscapeString(title)))
-	b.WriteString(fmt.Sprintf("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#111827\" stroke-width=\"1\"/>\n", left, top+plotHeight, left+plotWidth, top+plotHeight))
-	b.WriteString(fmt.Sprintf("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#111827\" stroke-width=\"1\"/>\n", left, top, left, top+plotHeight))
+	fmt.Fprintf(b, "<text x=\"%.1f\" y=\"34\" font-size=\"20\" font-family=\"Arial, sans-serif\" font-weight=\"700\">%s</text>\n", left, html.EscapeString(title))
+	fmt.Fprintf(b, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#111827\" stroke-width=\"1\"/>\n", left, top+plotHeight, left+plotWidth, top+plotHeight)
+	fmt.Fprintf(b, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#111827\" stroke-width=\"1\"/>\n", left, top, left, top+plotHeight)
 	for i := 0; i <= 4; i++ {
 		ratio := float64(i) / 4
 		y := top + plotHeight - ratio*plotHeight
 		value := ratio * maxValue
-		b.WriteString(fmt.Sprintf("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#e5e7eb\"/>\n", left, y, left+plotWidth, y))
-		b.WriteString(fmt.Sprintf("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" text-anchor=\"end\">%.1f</text>\n", left-8, y+4, value))
+		fmt.Fprintf(b, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#e5e7eb\"/>\n", left, y, left+plotWidth, y)
+		fmt.Fprintf(b, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" text-anchor=\"end\">%.1f</text>\n", left-8, y+4, value)
 	}
-	b.WriteString(fmt.Sprintf("<text x=\"20\" y=\"%.1f\" font-size=\"12\" transform=\"rotate(-90 20 %.1f)\">%s</text>\n", top+plotHeight/2, top+plotHeight/2, html.EscapeString(unit)))
+	fmt.Fprintf(b, "<text x=\"20\" y=\"%.1f\" font-size=\"12\" transform=\"rotate(-90 20 %.1f)\">%s</text>\n", top+plotHeight/2, top+plotHeight/2, html.EscapeString(unit))
 }
 
 func maxRowValue(rows []aggregateRow, fn func(aggregateRow) float64) float64 {

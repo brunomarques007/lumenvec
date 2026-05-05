@@ -808,7 +808,7 @@ func (p *PGVector) Insert(ctx context.Context, vectors []dataset.Vector) error {
 		}
 		idParam := i*2 + 1
 		vectorParam := i*2 + 2
-		b.WriteString(fmt.Sprintf("($%d, $%d::vector)", idParam, vectorParam))
+		fmt.Fprintf(&b, "($%d, $%d::vector)", idParam, vectorParam)
 		args = append(args, vector.ID, vectorLiteral(vector.Values))
 	}
 	_, err := p.db.ExecContext(ctx, b.String(), args...)
